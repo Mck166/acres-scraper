@@ -3,6 +3,7 @@ python-dotenv==1.0.0
 pymongo==4.6.0
 requests==2.31.0
 certifi==2023.11.17
+beautifulsoup4==4.12.2
 
 # Testing
 pytest==7.4.3

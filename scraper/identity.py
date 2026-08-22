@@ -4,6 +4,10 @@ A *listing* is identified by its MLS number (``listing_id``), which changes ever
 time a property is relisted. A *property* is identified by its provincial parcel
 ID (``PID``), which survives relisting. Keeping the two separate is what lets a
 sold home reappear later as a new listing without losing its history.
+
+Cutsheet URLs look like ``/cutsheet/{listing_id}/{class_id}``, where class id is
+viewpoint's property class (1 residential, 5 land, and so on). The same pair
+addresses the listing's photos, so both halves matter.
 """
 
 import re
@@ -13,19 +17,19 @@ CUTSHEET_RE = re.compile(r"/cutsheet/(\d+)(?:/(\d+))?", re.IGNORECASE)
 
 
 def parse_cutsheet_url(url: Optional[str]) -> Optional[Tuple[str, str]]:
-    """Return ``(listing_id, sequence)`` from a cutsheet URL, or None."""
+    """Return ``(listing_id, class_id)`` from a cutsheet URL, or None."""
     if not url:
         return None
     match = CUTSHEET_RE.search(str(url))
     if not match:
         return None
     listing_id = match.group(1)
-    sequence = match.group(2) or "1"
-    return listing_id, sequence
+    class_id = match.group(2) or "1"
+    return listing_id, class_id
 
 
-def build_cutsheet_url(listing_id: str, sequence: str = "1", base_url: str = "https://www.viewpoint.ca") -> str:
-    return f"{base_url.rstrip('/')}/cutsheet/{listing_id}/{sequence}"
+def build_cutsheet_url(listing_id: str, class_id: str = "1", base_url: str = "https://www.viewpoint.ca") -> str:
+    return f"{base_url.rstrip('/')}/cutsheet/{listing_id}/{class_id}"
 
 
 def listing_id_from_url(url: Optional[str]) -> Optional[str]:
@@ -33,7 +37,7 @@ def listing_id_from_url(url: Optional[str]) -> Optional[str]:
     return parsed[0] if parsed else None
 
 
-def sequence_from_url(url: Optional[str]) -> str:
+def class_id_from_url(url: Optional[str]) -> str:
     parsed = parse_cutsheet_url(url)
     return parsed[1] if parsed else "1"
 

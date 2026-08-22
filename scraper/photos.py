@@ -4,7 +4,7 @@ Viewpoint serves listing photos from two interchangeable, fully predictable URL
 shapes:
 
     /property/cutimage/{photo_group_id}/{n}.jpg?sd=lg&cch={hash}
-    /property/cutimagel/{listing_id}/{sequence}/{n}.jpg?&sd=summary&cch={hash}
+    /property/cutimagel/{listing_id}/{class_id}/{n}.jpg?&sd=summary&cch={hash}
 
 Both return the same bytes. The second is what the database already stores and
 is the one we emit, because it can be built from the listing id we key on.
@@ -26,9 +26,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 DEFAULT_SIZE = "summary"
 
-# Matches both URL shapes. The group form has no sequence segment.
+# Matches both URL shapes. The group form has no class_id segment.
 PHOTO_URL_RE = re.compile(
-    r"/property/(?P<kind>cutimagel|cutimage)/(?P<first>\d+)/(?:(?P<sequence>\d+)/)?(?P<index>\d+)\.jpg"
+    r"/property/(?P<kind>cutimagel|cutimage)/(?P<first>\d+)/(?:(?P<class_id>\d+)/)?(?P<index>\d+)\.jpg"
     r"(?P<query>[^\"'\s>]*)",
     re.IGNORECASE,
 )
@@ -49,21 +49,21 @@ class PhotoSet:
     """Everything needed to build a listing's photo URLs."""
 
     listing_id: str
-    sequence: str
+    class_id: str
     count: int
     cch: str
 
 
 def build_photo_url(
     listing_id: str,
-    sequence: str,
+    class_id: str,
     index: int,
     cch: str,
     base_url: str = "https://www.viewpoint.ca",
     size: str = DEFAULT_SIZE,
 ) -> str:
     return (
-        f"{base_url.rstrip('/')}/property/cutimagel/{listing_id}/{sequence}/{index}.jpg"
+        f"{base_url.rstrip('/')}/property/cutimagel/{listing_id}/{class_id}/{index}.jpg"
         f"?&sd={size}&cch={cch}"
     )
 
@@ -86,16 +86,16 @@ def parse_photo_url(url: str) -> Optional[Dict[str, str]]:
     }
     if parsed["kind"] == "cutimagel":
         parsed["listing_id"] = groups["first"]
-        parsed["sequence"] = groups["sequence"] or "1"
+        parsed["class_id"] = groups["class_id"] or "1"
     else:
         parsed["photo_group_id"] = groups["first"]
-        parsed["sequence"] = "1"
+        parsed["class_id"] = "1"
     return parsed
 
 
 def derive_photo_urls(
     listing_id: str,
-    sequence: str,
+    class_id: str,
     count: int,
     cch: str,
     base_url: str = "https://www.viewpoint.ca",
@@ -105,7 +105,7 @@ def derive_photo_urls(
     if not listing_id or count <= 0:
         return []
     return [
-        build_photo_url(listing_id, sequence, index, cch, base_url, size)
+        build_photo_url(listing_id, class_id, index, cch, base_url, size)
         for index in range(1, count + 1)
     ]
 
@@ -114,7 +114,7 @@ def photo_urls_for(photo_set: Optional[PhotoSet], base_url: str = "https://www.v
     if not photo_set:
         return []
     return derive_photo_urls(
-        photo_set.listing_id, photo_set.sequence, photo_set.count, photo_set.cch, base_url
+        photo_set.listing_id, photo_set.class_id, photo_set.count, photo_set.cch, base_url
     )
 
 
@@ -140,7 +140,7 @@ def extract_cache_hash(html: str) -> Optional[str]:
     return None
 
 
-def extract_photo_set(html: str, listing_id: str, sequence: str = "1") -> Optional[PhotoSet]:
+def extract_photo_set(html: str, listing_id: str, class_id: str = "1") -> Optional[PhotoSet]:
     """Work out a listing's complete photo set from its cutsheet page."""
     if not listing_id:
         return None
@@ -158,7 +158,7 @@ def extract_photo_set(html: str, listing_id: str, sequence: str = "1") -> Option
             return None
         count = max(indices)
 
-    return PhotoSet(listing_id=str(listing_id), sequence=str(sequence), count=count, cch=cch)
+    return PhotoSet(listing_id=str(listing_id), class_id=str(class_id), count=count, cch=cch)
 
 
 def normalize_photo_list(photos: Optional[Sequence[Any]]) -> List[str]:
@@ -202,12 +202,12 @@ class PlaceholderProbe:
     def _digest(content: bytes) -> str:
         return hashlib.md5(content).hexdigest()
 
-    def placeholder_digest(self, listing_id: str, sequence: str, cch: str, size: str = DEFAULT_SIZE) -> Optional[str]:
-        key = f"{listing_id}/{sequence}/{size}"
+    def placeholder_digest(self, listing_id: str, class_id: str, cch: str, size: str = DEFAULT_SIZE) -> Optional[str]:
+        key = f"{listing_id}/{class_id}/{size}"
         if key in self._digests:
             return self._digests[key]
 
-        url = build_photo_url(listing_id, sequence, PROBE_INDEX, cch, self.base_url, size)
+        url = build_photo_url(listing_id, class_id, PROBE_INDEX, cch, self.base_url, size)
         try:
             response = self.session.get(url, timeout=30)
         except Exception:
@@ -219,8 +219,8 @@ class PlaceholderProbe:
         self._digests[key] = digest
         return digest
 
-    def is_real_photo(self, url: str, listing_id: str, sequence: str, cch: str, size: str = DEFAULT_SIZE) -> bool:
-        placeholder = self.placeholder_digest(listing_id, sequence, cch, size)
+    def is_real_photo(self, url: str, listing_id: str, class_id: str, cch: str, size: str = DEFAULT_SIZE) -> bool:
+        placeholder = self.placeholder_digest(listing_id, class_id, cch, size)
         try:
             response = self.session.get(url, timeout=30)
         except Exception:
@@ -240,13 +240,13 @@ class PlaceholderProbe:
         if photo_set.count <= 0:
             return 0
 
-        args = (photo_set.listing_id, photo_set.sequence, photo_set.cch, size)
-        last_url = build_photo_url(photo_set.listing_id, photo_set.sequence, photo_set.count, photo_set.cch, self.base_url, size)
+        args = (photo_set.listing_id, photo_set.class_id, photo_set.cch, size)
+        last_url = build_photo_url(photo_set.listing_id, photo_set.class_id, photo_set.count, photo_set.cch, self.base_url, size)
         if self.is_real_photo(last_url, *args):
             return photo_set.count
 
         for index in range(photo_set.count - 1, 0, -1):
-            url = build_photo_url(photo_set.listing_id, photo_set.sequence, index, photo_set.cch, self.base_url, size)
+            url = build_photo_url(photo_set.listing_id, photo_set.class_id, index, photo_set.cch, self.base_url, size)
             if self.is_real_photo(url, *args):
                 return index
         return 0

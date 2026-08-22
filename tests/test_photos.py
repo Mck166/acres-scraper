@@ -43,7 +43,7 @@ def test_extract_cache_hash(cutsheet_html):
 def test_extract_photo_set_builds_the_whole_run(cutsheet_html):
     photo_set = extract_photo_set(cutsheet_html, "202603269", "1")
 
-    assert photo_set == PhotoSet(listing_id="202603269", sequence="1", count=49, cch="51edc21e")
+    assert photo_set == PhotoSet(listing_id="202603269", class_id="1", count=49, cch="51edc21e")
 
     urls = photo_urls_for(photo_set)
     assert len(urls) == 49
@@ -71,11 +71,11 @@ def test_extract_photo_set_falls_back_to_rendered_images():
     [
         (
             "https://www.viewpoint.ca/property/cutimagel/202509640/1/7.jpg?&sd=summary&cch=1dd45d97",
-            {"kind": "cutimagel", "listing_id": "202509640", "sequence": "1", "index": "7", "cch": "1dd45d97"},
+            {"kind": "cutimagel", "listing_id": "202509640", "class_id": "1", "index": "7", "cch": "1dd45d97"},
         ),
         (
             "https://www.viewpoint.ca/property/cutimage/11673773/12.jpg?sd=lg&cch=51edc21e",
-            {"kind": "cutimage", "photo_group_id": "11673773", "sequence": "1", "index": "12", "cch": "51edc21e"},
+            {"kind": "cutimage", "photo_group_id": "11673773", "class_id": "1", "index": "12", "cch": "51edc21e"},
         ),
     ],
 )

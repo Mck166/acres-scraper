@@ -9,11 +9,32 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from .identity import listing_id_from_url, sequence_from_url
+from .identity import listing_id_from_url, class_id_from_url
 
 STATUS_FOR_SALE = "FOR SALE"
 STATUS_PENDING = "PENDING SALE"
 STATUS_SOLD = "SOLD"
+STATUS_EXPIRED = "EXPIRED"
+
+# Viewpoint's numeric listing states, learned from its new-today change events:
+# a listing goes None -> 5 when it lists, 5 -> 6 when it sells subject to
+# conditions, 6 -> 2 when that sale closes, and 5 -> 1 when it comes off the
+# market unsold.
+STATUS_IDS = {
+    "1": STATUS_EXPIRED,
+    "2": STATUS_SOLD,
+    "5": STATUS_FOR_SALE,
+    "6": STATUS_SOLD,
+    "7": STATUS_FOR_SALE,
+    "8": STATUS_EXPIRED,
+}
+
+
+def status_from_id(status_id: Any) -> Optional[str]:
+    """Map a viewpoint status id onto our vocabulary."""
+    if status_id is None:
+        return None
+    return STATUS_IDS.get(str(status_id).strip())
 
 # Acres-API decides map visibility with a substring check for
 # sold/sale/active/list/offer (is_sale_or_sold) and colours lots the same way.
@@ -23,6 +44,7 @@ STATUS_SOLD = "SOLD"
 # in recent_updates instead of being conflated with the listing's state.
 _SOLD_TOKENS = ("sold", "closed")
 _PENDING_TOKENS = ("pending", "conditional", "offer", "under contract")
+_EXPIRED_TOKENS = ("expired", "withdrawn", "cancelled", "canceled", "terminated")
 
 _PRICE_CLEAN_RE = re.compile(r"[^0-9.]")
 
@@ -58,6 +80,8 @@ def normalize_status(value: Any) -> str:
         return STATUS_FOR_SALE
     if any(token in text for token in _SOLD_TOKENS):
         return STATUS_SOLD
+    if any(token in text for token in _EXPIRED_TOKENS):
+        return STATUS_EXPIRED
     if any(token in text for token in _PENDING_TOKENS):
         return STATUS_PENDING
     return STATUS_FOR_SALE
@@ -65,6 +89,11 @@ def normalize_status(value: Any) -> str:
 
 def is_sold_status(value: Any) -> bool:
     return normalize_status(value) == STATUS_SOLD
+
+
+def is_off_market_status(value: Any) -> bool:
+    """True when a listing should no longer appear as available."""
+    return normalize_status(value) in (STATUS_SOLD, STATUS_EXPIRED)
 
 
 def utcnow() -> datetime:
@@ -102,7 +131,7 @@ def normalize_document(raw: Dict[str, Any], url: Optional[str] = None) -> Dict[s
     listing_id = doc.get("listing_id") or listing_id_from_url(resolved_url)
     if listing_id:
         doc["listing_id"] = str(listing_id)
-        doc["listing_sequence"] = str(doc.get("listing_sequence") or sequence_from_url(resolved_url))
+        doc["listing_class_id"] = str(doc.get("listing_class_id") or class_id_from_url(resolved_url))
 
     raw_status = doc.get("Status")
     doc["Status"] = normalize_status(raw_status)

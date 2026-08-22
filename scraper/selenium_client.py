@@ -202,8 +202,8 @@ class SeleniumClient:
         if not parsed:
             return []
 
-        listing_id, sequence = parsed
-        photo_set = extract_photo_set(html, listing_id, sequence)
+        listing_id, class_id = parsed
+        photo_set = extract_photo_set(html, listing_id, class_id)
         if photo_set is None:
             return []
 
