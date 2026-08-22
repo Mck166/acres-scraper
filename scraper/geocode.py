@@ -105,6 +105,10 @@ class CachedGeocoder:
         self.cache = cache_collection
         self.session = session
 
+    def _resolve(self, address: str) -> Optional[Dict[str, Any]]:
+        """The actual network lookup, separated so tests can replace it."""
+        return geocode_address(address, session=self.session)
+
     def lookup(self, address: str) -> Optional[Dict[str, Any]]:
         key = normalize_address_key(address)
         if not key:
@@ -121,7 +125,7 @@ class CachedGeocoder:
                     "display_name": cached.get("display_name", ""),
                 }
 
-        result = geocode_address(address, session=self.session)
+        result = self._resolve(address)
 
         if self.cache is not None:
             self.cache.update_one(

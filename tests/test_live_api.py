@@ -100,7 +100,13 @@ def test_api_transport_sees_everything_the_browser_does(client, activity):
 
 
 def test_a_detailed_listing_carries_the_mls_block(client, activity):
-    """Residential listings must still fill the app's detail screen."""
+    """A real residential listing must fill every field the clients read.
+
+    The expected names come from Acres-API's projection and alias tuples, the
+    app's PropertyDetailScreen, and the website's detail page.
+    """
+    from tests.test_normalize import CLIENT_FIELDS
+
     residential = next(
         (entry for entry in activity if entry.get("class_id") == "1" and entry.get("mla")),
         None,
@@ -108,7 +114,10 @@ def test_a_detailed_listing_carries_the_mls_block(client, activity):
     if residential is None:
         pytest.skip("no residential listing with living area in today's activity")
 
-    raw = client.fetch_listing(residential["url"])
+    document = normalize_document(client.fetch_listing(residential["url"]), url=residential["url"])
 
-    for field in ("PID", "TYPE", "BEDS", "BATHROOMS (F/H)", "ROOF", "LISTED BY"):
-        assert field in raw, f"{field} missing from {residential['url']}"
+    missing = sorted(field for field in CLIENT_FIELDS if field not in document)
+    assert not missing, f"{residential['url']} is missing {missing}"
+
+    assert document["price_value"] is not None
+    assert document["listing_id"] == residential["listing_id"]

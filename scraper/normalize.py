@@ -164,10 +164,13 @@ def normalize_document(raw: Dict[str, Any], url: Optional[str] = None) -> Dict[s
         doc["listing_id"] = str(listing_id)
         doc["listing_class_id"] = str(doc.get("listing_class_id") or class_id_from_url(resolved_url))
 
-    raw_status = doc.get("Status")
+    raw_status = str(doc.get("Status") or "").strip().upper()
     doc["Status"] = normalize_status(raw_status)
-    if raw_status is not None and str(raw_status).strip():
-        doc["status_raw"] = str(raw_status).strip().upper()
+    # Keep the site's own wording only when it says something the normalized
+    # value does not. Re-normalizing a document must not overwrite it with the
+    # value this function itself produced.
+    if raw_status and raw_status != doc["Status"] and "status_raw" not in doc:
+        doc["status_raw"] = raw_status
 
     price_value = parse_price(doc.get("Price"))
     doc["price_value"] = price_value
