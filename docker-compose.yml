@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  prop-scraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: prop-scraper
+    restart: unless-stopped
+    environment:
+      - VIEWPOINT_USER=${VIEWPOINT_USER}
+      - VIEWPOINT_PASS=${VIEWPOINT_PASS}
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGODB_DB_NAME=${MONGODB_DB_NAME:-viewpoint_properties}
+      - MONGODB_COLLECTION_NAME=${MONGODB_COLLECTION_NAME:-properties}
+    env_file:
+      - .env
+    volumes:
+      # Mount logs directory to persist logs
+      - ./logs:/app/logs
+    # Keep container running
+    tty: true
+    stdin_open: true
+

@@ -1,0 +1,55 @@
+# Prop Scraper
+
+A web scraper for property listings from viewpoint.ca
+
+## Docker Setup
+
+### Prerequisites
+
+1. Docker and Docker Compose installed
+2. A `.env` file in the project root with the following variables:
+   ```
+   VIEWPOINT_USER=your_username
+   VIEWPOINT_PASS=your_password
+   MONGODB_URI=your_mongodb_connection_string
+   MONGODB_DB_NAME=viewpoint_properties  # optional, defaults to viewpoint_properties
+   MONGODB_COLLECTION_NAME=properties     # optional, defaults to properties
+   ```
+
+### Running with Docker Compose
+
+1. **Build and start the container:**
+   ```bash
+   docker-compose up -d
+   ```
+
+2. **View logs:**
+   ```bash
+   docker-compose logs -f
+   ```
+
+3. **Stop the container:**
+   ```bash
+   docker-compose down
+   ```
+
+### How It Works
+
+- The scraper runs automatically every 6 hours via cron
+- It also runs once immediately when the container starts
+- Logs are stored in the `./logs` directory (mounted as a volume)
+- The container stays running to execute scheduled runs
+
+### Viewing Logs
+
+- **Real-time logs:** `docker-compose logs -f`
+- **Cron execution logs:** Check `./logs/cron.log`
+- **Container logs:** `docker logs prop-scraper`
+
+### Manual Execution
+
+To run the scraper manually inside the container:
+```bash
+docker-compose exec prop-scraper python /app/app.py
+```
+
