@@ -15,3 +15,6 @@ output/
 
 .venv/
 .pytest_cache/
+
+# Database dumps taken before a migration. Real listing data; never commit.
+backups/
