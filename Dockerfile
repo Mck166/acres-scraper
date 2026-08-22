@@ -37,6 +37,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
+COPY scraper/ ./scraper/
+COPY tools/ ./tools/
 COPY entrypoint.sh .
 
 # Make entrypoint executable

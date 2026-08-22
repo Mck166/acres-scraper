@@ -1,0 +1,435 @@
+"""MongoDB access layer.
+
+Three collections carry listing data:
+
+``properties``      active listings, the source of truth for the feed and map
+``sold_properties`` sold listings, archived with their original ``_id`` so that
+                    favourites and dislikes keep resolving
+``recent_updates``  one row per change in the last 24 hours, expired by a TTL
+                    index, used to drive the app's swipe deck
+"""
+
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import certifi
+from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.errors import DuplicateKeyError
+
+from .config import Settings, get_settings
+from .identity import resolve_listing_id
+from .normalize import STATUS_SOLD, is_sold_status, parse_price, utcnow
+
+CHANGE_NEW = "new"
+CHANGE_PRICE = "price"
+CHANGE_SOLD = "sold"
+CHANGE_NONE = "none"
+
+
+@dataclass
+class SaveResult:
+    """What happened to a single listing during a save."""
+
+    listing_id: Optional[str]
+    action: str
+    property_id: Any = None
+    old_price: Optional[float] = None
+    new_price: Optional[float] = None
+    relisted: bool = False
+
+    @property
+    def is_change(self) -> bool:
+        return self.action in (CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD)
+
+
+@dataclass
+class RunSummary:
+    """Counters for a single scraper run."""
+
+    started_at: datetime = field(default_factory=utcnow)
+    finished_at: Optional[datetime] = None
+    listings_seen: int = 0
+    new_listings: int = 0
+    price_changes: int = 0
+    sold: int = 0
+    unchanged: int = 0
+    relisted: int = 0
+    stale_rechecked: int = 0
+    errors: List[str] = field(default_factory=list)
+
+    def record(self, result: SaveResult) -> None:
+        self.listings_seen += 1
+        if result.action == CHANGE_NEW:
+            self.new_listings += 1
+        elif result.action == CHANGE_PRICE:
+            self.price_changes += 1
+        elif result.action == CHANGE_SOLD:
+            self.sold += 1
+        else:
+            self.unchanged += 1
+        if result.relisted:
+            self.relisted += 1
+
+    def to_document(self) -> Dict[str, Any]:
+        finished = self.finished_at or utcnow()
+        return {
+            "started_at": self.started_at,
+            "finished_at": finished,
+            "duration_seconds": (finished - self.started_at).total_seconds(),
+            "listings_seen": self.listings_seen,
+            "new_listings": self.new_listings,
+            "price_changes": self.price_changes,
+            "sold": self.sold,
+            "unchanged": self.unchanged,
+            "relisted": self.relisted,
+            "stale_rechecked": self.stale_rechecked,
+            "errors": self.errors,
+        }
+
+
+def connect(settings: Optional[Settings] = None) -> MongoClient:
+    settings = settings or get_settings()
+
+    options: Dict[str, Any] = {"serverSelectionTimeoutMS": 10000}
+    # Python installs on macOS routinely lack a usable system CA bundle, which
+    # makes Atlas connections fail TLS verification. Point pymongo at certifi's.
+    if settings.mongodb_uri.startswith("mongodb+srv://") or "tls=true" in settings.mongodb_uri.lower():
+        options["tlsCAFile"] = certifi.where()
+
+    client = MongoClient(settings.mongodb_uri, **options)
+    client.admin.command("ping")
+    return client
+
+
+class Store:
+    """Everything the scraper does to MongoDB."""
+
+    def __init__(self, client: MongoClient, settings: Optional[Settings] = None, db_name: Optional[str] = None):
+        self.settings = settings or get_settings()
+        self.client = client
+        self.db = client[db_name or self.settings.mongodb_db_name]
+
+    # -- collections -----------------------------------------------------
+
+    @property
+    def properties(self):
+        return self.db[self.settings.properties_collection]
+
+    @property
+    def sold(self):
+        return self.db[self.settings.sold_collection]
+
+    @property
+    def recent_updates(self):
+        return self.db[self.settings.recent_updates_collection]
+
+    @property
+    def geocode_cache(self):
+        return self.db[self.settings.geocode_cache_collection]
+
+    @property
+    def scrape_runs(self):
+        return self.db[self.settings.scrape_runs_collection]
+
+    @property
+    def locks(self):
+        return self.db[self.settings.locks_collection]
+
+    # -- schema ----------------------------------------------------------
+
+    def ensure_indexes(self) -> None:
+        for collection in (self.properties, self.sold):
+            collection.create_index("listing_id", unique=True, sparse=True)
+            collection.create_index("PID")
+            collection.create_index("Status")
+            collection.create_index("url")
+            collection.create_index("date_added")
+            collection.create_index("date_updated")
+
+        self.recent_updates.create_index("changed_at", expireAfterSeconds=self.settings.recent_updates_ttl_seconds)
+        self.recent_updates.create_index("property_id")
+        self.recent_updates.create_index("listing_id")
+        self.sold.create_index("sold_at")
+        self.locks.create_index("expires_at", expireAfterSeconds=0)
+
+    # -- lookups ---------------------------------------------------------
+
+    def find_active(self, listing_id: str, url: Optional[str] = None) -> Optional[dict]:
+        return self._find_in(self.properties, listing_id, url)
+
+    def find_sold(self, listing_id: str, url: Optional[str] = None) -> Optional[dict]:
+        return self._find_in(self.sold, listing_id, url)
+
+    @staticmethod
+    def _find_in(collection, listing_id: Optional[str], url: Optional[str]) -> Optional[dict]:
+        clauses: List[dict] = []
+        if listing_id:
+            clauses.append({"listing_id": str(listing_id)})
+        if url:
+            clauses.append({"url": url})
+        if not clauses:
+            return None
+        query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+        return collection.find_one(query)
+
+    def active_snapshot(self) -> Dict[str, dict]:
+        """Lightweight view of every active listing, keyed by listing id."""
+        projection = {"listing_id": 1, "url": 1, "Status": 1, "Price": 1, "price_value": 1, "date_updated": 1}
+        snapshot: Dict[str, dict] = {}
+        for doc in self.properties.find({}, projection):
+            listing_id = resolve_listing_id(doc)
+            if listing_id:
+                snapshot[listing_id] = doc
+        return snapshot
+
+    def stale_active_listings(self, limit: int) -> List[dict]:
+        """The active listings we have not looked at in the longest."""
+        if limit <= 0:
+            return []
+        cursor = (
+            self.properties.find({}, {"listing_id": 1, "url": 1, "Status": 1, "Price": 1, "date_updated": 1})
+            .sort("date_updated", ASCENDING)
+            .limit(limit)
+        )
+        return list(cursor)
+
+    # -- writes ----------------------------------------------------------
+
+    def save_listing(self, document: Dict[str, Any]) -> SaveResult:
+        """Insert, update, or archive a listing based on how it changed."""
+        document = dict(document)
+        listing_id = resolve_listing_id(document)
+        url = document.get("url")
+        now = utcnow()
+
+        existing = self.find_active(listing_id, url) if listing_id or url else None
+        sold_now = is_sold_status(document.get("Status"))
+
+        if existing is None:
+            archived = self.find_sold(listing_id, url) if listing_id or url else None
+            if archived is not None:
+                return self._refresh_archived(archived, document, now)
+            return self._insert_new(document, now, sold_now)
+
+        return self._update_existing(existing, document, now, sold_now)
+
+    def _insert_new(self, document: Dict[str, Any], now: datetime, sold_now: bool) -> SaveResult:
+        document.setdefault("date_added", now)
+        document["date_updated"] = now
+
+        relisted = self._apply_relisting_history(document)
+
+        collection = self.sold if sold_now else self.properties
+        if sold_now:
+            document.setdefault("sold_at", now)
+            document.setdefault("sold_price", parse_price(document.get("Price")))
+            document["archived_at"] = now
+
+        try:
+            result = collection.insert_one(document)
+            property_id = result.inserted_id
+        except DuplicateKeyError:
+            # Another run inserted it first; fold our data into that document.
+            existing = self._find_in(collection, resolve_listing_id(document), document.get("url"))
+            if existing is None:
+                raise
+            collection.update_one({"_id": existing["_id"]}, {"$set": document})
+            property_id = existing["_id"]
+
+        return SaveResult(
+            listing_id=resolve_listing_id(document),
+            action=CHANGE_SOLD if sold_now else CHANGE_NEW,
+            property_id=property_id,
+            new_price=parse_price(document.get("Price")),
+            relisted=relisted,
+        )
+
+    def _update_existing(
+        self, existing: dict, document: Dict[str, Any], now: datetime, sold_now: bool
+    ) -> SaveResult:
+        old_price = parse_price(existing.get("Price"))
+        new_price = parse_price(document.get("Price"))
+        was_sold = is_sold_status(existing.get("Status"))
+
+        update: Dict[str, Any] = {key: value for key, value in document.items() if key != "_id"}
+        update.pop("date_added", None)
+        update["date_updated"] = now
+
+        price_changed = (
+            old_price is not None and new_price is not None and old_price != new_price
+        )
+        if price_changed:
+            history = list(existing.get("price_history") or [])
+            history.append(
+                {
+                    "price": existing.get("Price"),
+                    "price_value": old_price,
+                    "date": existing.get("date_updated") or existing.get("date_added") or now,
+                }
+            )
+            update["price_history"] = history
+            update["price_changed_at"] = now
+
+        if sold_now and not was_sold:
+            return self._archive(existing, update, now, old_price, new_price)
+
+        self.properties.update_one({"_id": existing["_id"]}, {"$set": update})
+
+        if price_changed:
+            action = CHANGE_PRICE
+        elif sold_now:
+            action = CHANGE_NONE
+        else:
+            action = CHANGE_NONE
+
+        return SaveResult(
+            listing_id=resolve_listing_id(existing) or resolve_listing_id(document),
+            action=action,
+            property_id=existing["_id"],
+            old_price=old_price,
+            new_price=new_price,
+        )
+
+    def _archive(
+        self,
+        existing: dict,
+        update: Dict[str, Any],
+        now: datetime,
+        old_price: Optional[float],
+        new_price: Optional[float],
+    ) -> SaveResult:
+        """Move a listing into the sold archive, keeping its ``_id``."""
+        archived = dict(existing)
+        archived.update(update)
+        archived["_id"] = existing["_id"]
+        archived["Status"] = STATUS_SOLD
+        archived["sold_at"] = now
+        archived["sold_price"] = new_price if new_price is not None else old_price
+        archived["archived_at"] = now
+
+        date_added = existing.get("date_added")
+        if isinstance(date_added, datetime):
+            archived["days_on_market"] = max((now - date_added).days, 0)
+
+        self.sold.replace_one({"_id": existing["_id"]}, archived, upsert=True)
+        self.properties.delete_one({"_id": existing["_id"]})
+
+        return SaveResult(
+            listing_id=resolve_listing_id(archived),
+            action=CHANGE_SOLD,
+            property_id=existing["_id"],
+            old_price=old_price,
+            new_price=archived["sold_price"],
+        )
+
+    def _refresh_archived(self, archived: dict, document: Dict[str, Any], now: datetime) -> SaveResult:
+        """A listing we already archived showed up again under the same id."""
+        if not is_sold_status(document.get("Status")):
+            # It came back on the market under its original listing id, so move
+            # it back into the active collection rather than creating a twin.
+            revived = dict(archived)
+            revived.update({key: value for key, value in document.items() if key != "_id"})
+            revived["_id"] = archived["_id"]
+            revived["date_updated"] = now
+            revived["relisted"] = True
+            revived["relisted_at"] = now
+            for key in ("sold_at", "sold_price", "archived_at", "days_on_market"):
+                revived.pop(key, None)
+
+            self.properties.replace_one({"_id": archived["_id"]}, revived, upsert=True)
+            self.sold.delete_one({"_id": archived["_id"]})
+
+            return SaveResult(
+                listing_id=resolve_listing_id(revived),
+                action=CHANGE_NEW,
+                property_id=archived["_id"],
+                new_price=parse_price(revived.get("Price")),
+                relisted=True,
+            )
+
+        update = {key: value for key, value in document.items() if key != "_id"}
+        update.pop("date_added", None)
+        update["date_updated"] = now
+        self.sold.update_one({"_id": archived["_id"]}, {"$set": update})
+        return SaveResult(
+            listing_id=resolve_listing_id(archived),
+            action=CHANGE_NONE,
+            property_id=archived["_id"],
+        )
+
+    def _apply_relisting_history(self, document: Dict[str, Any]) -> bool:
+        """Link a new listing to earlier sales of the same parcel."""
+        pid = document.get("PID")
+        if not pid:
+            return False
+
+        listing_id = resolve_listing_id(document)
+        previous = list(
+            self.sold.find(
+                {"PID": str(pid)},
+                {"listing_id": 1, "sold_at": 1, "sold_price": 1, "Price": 1, "url": 1},
+            ).sort("sold_at", DESCENDING)
+        )
+        previous = [doc for doc in previous if resolve_listing_id(doc) != listing_id]
+        if not previous:
+            return False
+
+        document["relisted"] = True
+        document["previous_listing_ids"] = [
+            resolve_listing_id(doc) for doc in previous if resolve_listing_id(doc)
+        ]
+        document["sale_history"] = [
+            {
+                "listing_id": resolve_listing_id(doc),
+                "sold_at": doc.get("sold_at"),
+                "sold_price": doc.get("sold_price") or parse_price(doc.get("Price")),
+            }
+            for doc in previous
+        ]
+        return True
+
+    # -- change log ------------------------------------------------------
+
+    def record_change(self, result: SaveResult, document: Dict[str, Any]) -> None:
+        """Log a change so the app's swipe deck can find it for 24 hours."""
+        if not result.is_change:
+            return
+
+        source = self.settings.sold_collection if result.action == CHANGE_SOLD else self.settings.properties_collection
+        self.recent_updates.update_one(
+            {"property_id": str(result.property_id), "change_type": result.action},
+            {
+                "$set": {
+                    "property_id": str(result.property_id),
+                    "listing_id": result.listing_id,
+                    "change_type": result.action,
+                    "old_price": result.old_price,
+                    "new_price": result.new_price,
+                    "address": document.get("Address"),
+                    "source_collection": source,
+                    "changed_at": utcnow(),
+                }
+            },
+            upsert=True,
+        )
+
+    # -- run bookkeeping -------------------------------------------------
+
+    def acquire_lock(self, name: str, ttl_seconds: int = 3600) -> bool:
+        """Take a run lock. Returns False when another run already holds it."""
+        now = utcnow()
+        self.locks.delete_many({"_id": name, "expires_at": {"$lte": now}})
+        try:
+            self.locks.insert_one(
+                {"_id": name, "acquired_at": now, "expires_at": now + timedelta(seconds=ttl_seconds)}
+            )
+            return True
+        except DuplicateKeyError:
+            return False
+
+    def release_lock(self, name: str) -> None:
+        self.locks.delete_one({"_id": name})
+
+    def record_run(self, summary: RunSummary) -> None:
+        self.scrape_runs.insert_one(summary.to_document())

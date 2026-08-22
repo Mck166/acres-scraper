@@ -1,0 +1,45 @@
+{
+  "1 BEDROOM UNITS": "51",
+  "2 BEDROOM UNITS": "36",
+  "AGE": "N/A",
+  "APPLIANCES INCL.": "None",
+  "ASSESSED AT": "$57,800 (2025)",
+  "Address": "Windsor Back Road, Three Mile Plains",
+  "BANK OWNED": "No",
+  "BETTERMENT CHARGES": "N/A",
+  "BUILDING DIMENSIONS": "N/A",
+  "EXCLUSIONS": "N/A",
+  "HAS GARAGE": "Yes, underground with 72 parking spaces",
+  "HAS PCDS": "No",
+  "INCLUSIONS": "N/A",
+  "LISTED BY": "Sutton Group Professional Realty",
+  "LISTING PARCEL SIZE": "170,755 sqft (3.9 acres)",
+  "PARKING": "underground and outdoor (120 parking spaces total)",
+  "PID": "45402831",
+  "PROV. PARCEL SIZE": "170,755 sqft (3.9 acres)",
+  "Photo_Count": 1,
+  "Photos": [
+    "https://www.viewpoint.ca/property/cutimagel/202529747/3/1.jpg?&sd=summary&cch=5d4eae64"
+  ],
+  "Price": "$2,100,000",
+  "Status": "FOR SALE",
+  "TYPE": "Other",
+  "WATERFRONT": "No",
+  "_id": {
+    "$oid": "695414d8aab5e76a7231104e"
+  },
+  "date_added": {
+    "$date": "2025-12-30T18:07:20.613Z"
+  },
+  "date_updated": {
+    "$date": "2026-08-21T09:25:44.372Z"
+  },
+  "disliked": true,
+  "disliked_at": {
+    "$date": "2026-08-21T09:25:44.372Z"
+  },
+  "geocoded_address": "Windsor Back Road, Panuke Road, Three Mile Plains, Region of Windsor and West Hants Municipality, Hants County, Nova Scotia, B0N 2T0, Canada",
+  "latitude": 44.9630806,
+  "longitude": -64.1025409,
+  "url": "https://www.viewpoint.ca/cutsheet/202529747/3"
+}
