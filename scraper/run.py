@@ -1,14 +1,33 @@
-"""Entry point for a scraper run."""
+"""Entry point for a scraper run.
+
+A run takes a lock in MongoDB before it starts. Cron fires every six hours and a
+run that hits a slow site can outlast its slot, so without the lock two runs
+could archive and re-insert the same listing at the same time. The lock carries
+a TTL, so a container killed mid-run frees it without anyone intervening.
+
+Every run, successful or not, leaves a row in `scrape_runs`. That is the only
+way a missed window becomes visible: the activity feed has no backfill, so a day
+the scraper did not run is a day of listings that will never arrive.
+"""
 
 import logging
 import sys
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from .config import get_settings
+import requests
+
+from .config import Settings, get_settings
+from .normalize import utcnow
 from .selenium_client import SeleniumClient
 from .store import RunSummary, Store, connect
 
 log = logging.getLogger(__name__)
+
+LOCK_NAME = "scrape"
+
+
+class RunLocked(RuntimeError):
+    """Another run is already in progress."""
 
 
 def configure_logging(level: int = logging.INFO) -> None:
@@ -30,20 +49,99 @@ def open_client(settings=None):
     return ViewpointClient(settings)
 
 
-def scrape(limit: Optional[int] = None, store: Optional[Store] = None) -> RunSummary:
-    """Scrape the new-today list and save what changed."""
-    from .sync import sync_new_today
+def refresh_api_index(settings: Optional[Settings] = None) -> bool:
+    """Ask Acres-API to rebuild its catalogue now that the data has moved.
+
+    The API caches its index for ten minutes, so without this a listing sold
+    minutes ago keeps showing as for sale. A failure here is not a failed run:
+    the cache expires on its own.
+    """
+    settings = settings or get_settings()
+    if not settings.acres_api_url:
+        return False
+
+    url = f"{settings.acres_api_url}/api/index/refresh"
+    try:
+        response = requests.post(url, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        log.warning("Could not refresh the API index at %s: %s", url, exc)
+        return False
+
+    log.info("Refreshed the API index")
+    return True
+
+
+def log_summary(summary: RunSummary) -> None:
+    """One greppable line describing the whole run."""
+    document = summary.to_document()
+    fields = " ".join(
+        f"{key}={value}"
+        for key, value in (
+            ("seen", document["listings_seen"]),
+            ("new", document["new_listings"]),
+            ("price", document["price_changes"]),
+            ("sold", document["sold"]),
+            ("delisted", document["delisted"]),
+            ("relisted", document["relisted"]),
+            ("unchanged", document["unchanged"]),
+            ("skipped", document["skipped"]),
+            ("fetches", document["detail_fetches"]),
+            ("stale_rechecked", document["stale_rechecked"]),
+            ("errors", len(document["errors"])),
+            ("seconds", f"{document['duration_seconds']:.1f}"),
+        )
+    )
+    log.info("run complete %s", fields)
+
+
+def scrape(
+    limit: Optional[int] = None,
+    since: Optional[Any] = None,
+    store: Optional[Store] = None,
+    use_lock: bool = True,
+) -> RunSummary:
+    """Scrape the activity feed and save what changed.
+
+    Raises RunLocked when another run holds the lock.
+    """
+    from .sync import sync, sync_new_today
 
     settings = get_settings()
     owns_store = store is None
-    client_context = open_client(settings)
-
     if owns_store:
         store = Store(connect(settings), settings)
 
     try:
-        with client_context as client:
-            return sync_new_today(client, store, limit=limit)
+        store.ensure_indexes()
+
+        if use_lock and not store.acquire_lock(LOCK_NAME, settings.run_lock_ttl_seconds):
+            raise RunLocked("another scraper run is already in progress")
+
+        started_at = utcnow()
+        try:
+            with open_client(settings) as client:
+                if settings.transport == "selenium":
+                    summary = sync_new_today(client, store, limit=limit)
+                else:
+                    summary = sync(client, store, since=since, limit=limit)
+        except Exception as exc:
+            # A crashed run is the one most worth having a record of.
+            failed = RunSummary(started_at=started_at, finished_at=utcnow())
+            failed.errors.append(f"run failed: {exc}")
+            store.record_run(failed)
+            raise
+        finally:
+            if use_lock:
+                store.release_lock(LOCK_NAME)
+
+        store.record_run(summary)
+        log_summary(summary)
+
+        if summary.writes:
+            refresh_api_index(settings)
+
+        return summary
     finally:
         if owns_store:
             store.client.close()
@@ -64,19 +162,24 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.error("VIEWPOINT_USER and VIEWPOINT_PASS must be set")
         return 1
 
+    log.info(
+        "Starting run: transport=%s database=%s limit=%s",
+        settings.transport,
+        settings.mongodb_db_name,
+        limit,
+    )
+
     try:
-        summary = scrape(limit=limit)
+        scrape(limit=limit, use_lock="--no-lock" not in argv)
+    except RunLocked as exc:
+        # Cron firing while the previous run is still going is expected, not a
+        # failure, so it must not look like one to whatever watches exit codes.
+        log.warning("Skipping this run: %s", exc)
+        return 0
     except Exception:
         log.exception("Scraper run failed")
         return 1
 
-    log.info(
-        "Run finished: %d seen, %d new, %d price changes, %d sold",
-        summary.listings_seen,
-        summary.new_listings,
-        summary.price_changes,
-        summary.sold,
-    )
     return 0
 
 

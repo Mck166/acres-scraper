@@ -38,6 +38,7 @@ class Settings:
     stale_recheck_limit: int
     recent_updates_ttl_seconds: int
     request_delay_seconds: float
+    run_lock_ttl_seconds: int
 
     acres_api_url: str
 
@@ -67,6 +68,9 @@ class Settings:
             stale_recheck_limit=_int_env("STALE_RECHECK_LIMIT", 25),
             recent_updates_ttl_seconds=_int_env("RECENT_UPDATES_TTL_SECONDS", 86400),
             request_delay_seconds=float(os.getenv("VIEWPOINT_REQUEST_DELAY", "0.35")),
+            # Long enough that a slow run keeps its lock, short enough that a
+            # killed container does not block the next scheduled run for long.
+            run_lock_ttl_seconds=_int_env("RUN_LOCK_TTL_SECONDS", 3600),
             acres_api_url=os.getenv("ACRES_API_URL", "").rstrip("/"),
         )
 

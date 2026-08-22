@@ -42,6 +42,7 @@ def make_settings(**overrides) -> Settings:
         stale_recheck_limit=25,
         recent_updates_ttl_seconds=86400,
         request_delay_seconds=0.0,
+        run_lock_ttl_seconds=3600,
         acres_api_url="",
     )
     defaults.update(overrides)
