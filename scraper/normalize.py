@@ -5,36 +5,49 @@ Field names and their casing are load-bearing: Acres-API projects on ``Status``,
 keys directly. Nothing here may rename an existing key.
 """
 
+import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from .identity import listing_id_from_url, class_id_from_url
+from .identity import class_id_from_url, listing_id_from_url
+
+log = logging.getLogger(__name__)
 
 STATUS_FOR_SALE = "FOR SALE"
 STATUS_PENDING = "PENDING SALE"
 STATUS_SOLD = "SOLD"
 STATUS_EXPIRED = "EXPIRED"
 
-# Viewpoint's numeric listing states, learned from its new-today change events:
-# a listing goes None -> 5 when it lists, 5 -> 6 when it sells subject to
-# conditions, 6 -> 2 when that sale closes, and 5 -> 1 when it comes off the
-# market unsold.
+# Viewpoint's numeric listing states, learned from its new-today change events
+# and confirmed against the status each cutsheet displays: a listing goes
+# None -> 5 when it lists, 5 -> 6 when it sells subject to conditions,
+# 6 -> 2 when that sale closes, and 5 -> 1 when it comes off the market unsold.
 STATUS_IDS = {
-    "1": STATUS_EXPIRED,
-    "2": STATUS_SOLD,
-    "5": STATUS_FOR_SALE,
-    "6": STATUS_SOLD,
-    "7": STATUS_FOR_SALE,
-    "8": STATUS_EXPIRED,
+    "1": STATUS_EXPIRED,   # Expired
+    "2": STATUS_SOLD,      # Sold, closed
+    "3": STATUS_EXPIRED,   # Cancelled
+    "5": STATUS_FOR_SALE,  # Active
+    "6": STATUS_SOLD,      # Sold, not yet closed
+    "7": STATUS_FOR_SALE,  # Newly listed, price not yet published
+    "8": STATUS_EXPIRED,   # Withdrawn
 }
 
 
 def status_from_id(status_id: Any) -> Optional[str]:
-    """Map a viewpoint status id onto our vocabulary."""
+    """Map a viewpoint status id onto our vocabulary.
+
+    Returns None for ids we have not seen, so the caller can fall back to the
+    status the page displays rather than guess that a listing is for sale.
+    """
     if status_id is None:
         return None
-    return STATUS_IDS.get(str(status_id).strip())
+
+    key = str(status_id).strip()
+    status = STATUS_IDS.get(key)
+    if status is None:
+        log.warning("Unmapped viewpoint status id %r; falling back to the page's status text", key)
+    return status
 
 # Acres-API decides map visibility with a substring check for
 # sold/sale/active/list/offer (is_sale_or_sold) and colours lots the same way.
@@ -99,6 +112,24 @@ def is_off_market_status(value: Any) -> bool:
 def utcnow() -> datetime:
     """Naive UTC, matching what Acres-API's parse_datetime expects."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+DEFAULT_LOOKBACK_HOURS = 24
+
+
+def as_since(value: Any = None) -> str:
+    """Render a moment as the Unix timestamp viewpoint's activity feed wants."""
+    if value is None:
+        value = utcnow() - timedelta(hours=DEFAULT_LOOKBACK_HOURS)
+
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return str(int(moment.timestamp()))
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(int(value))
+
+    return str(value)
 
 
 def coerce_coordinate(value: Any) -> Optional[float]:

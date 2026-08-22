@@ -22,8 +22,15 @@ import requests
 from .config import Settings, get_settings
 from .cutsheet import parse_cutsheet
 from .identity import build_cutsheet_url, parse_cutsheet_url
-from .normalize import format_price, parse_price, status_from_id
-from .photos import PhotoSet, extract_photo_set, normalize_photo_list, photo_urls_for
+from .normalize import as_since, format_price, parse_price, status_from_id
+from .photos import (
+    PhotoSet,
+    PlaceholderProbe,
+    extract_photo_set,
+    normalize_photo_list,
+    photo_urls_for,
+    verify_photo_set,
+)
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +77,7 @@ class ViewpointClient:
         self._nonces: List[str] = []
         self._last_request_at = 0.0
         self._logged_in = False
+        self._probe: Optional[PlaceholderProbe] = None
 
     # -- lifecycle -------------------------------------------------------
 
@@ -250,8 +258,13 @@ class ViewpointClient:
 
     # -- endpoints -------------------------------------------------------
 
-    def new_today(self, since: str = "") -> Dict[str, Any]:
-        return self.call("listing", "newtoday", {"since": since})
+    def new_today(self, since: Any = None) -> Dict[str, Any]:
+        """The activity feed, covering everything changed since a given moment.
+
+        Sending an empty ``since`` returns a fixed window that lags behind and
+        omits changes made today, so a timestamp is always sent.
+        """
+        return self.call("listing", "newtoday", {"since": as_since(since)})
 
     def listing_photos(self, listing_id: str, class_id: str = "1") -> Dict[str, Any]:
         return self.call("listing", "photos", {"listing_id": listing_id, "class_id": class_id})
@@ -270,8 +283,8 @@ class ViewpointClient:
     # -- transport interface --------------------------------------------
     # Mirrors SeleniumClient so the sync engine does not care which is in use.
 
-    def new_today_activity(self, since: str = "") -> List[Dict[str, Any]]:
-        """The day's changed listings, one entry per listing.
+    def new_today_activity(self, since: Any = None) -> List[Dict[str, Any]]:
+        """The changed listings, one entry per listing.
 
         A single call returns every listing that changed along with its price,
         status, coordinates, and photo count, so nothing further is needed to
@@ -305,8 +318,8 @@ class ViewpointClient:
         )
         return activity
 
-    def new_today_urls(self) -> List[str]:
-        return [entry["url"] for entry in self.new_today_activity()]
+    def new_today_urls(self, since: Any = None) -> List[str]:
+        return [entry["url"] for entry in self.new_today_activity(since=since)]
 
     def fetch_listing(self, cutsheet_url: str) -> Optional[Dict[str, Any]]:
         """Scrape one listing into the raw shape the normalizer expects."""
@@ -388,4 +401,15 @@ class ViewpointClient:
                     listing_id=listing_id, class_id=class_id, count=stated, cch=cch
                 )
 
+        if photo_set is not None:
+            # The advertised count is occasionally one higher than the number of
+            # photos actually served, and an over-long set shows the app a
+            # placeholder image as though it were a real photo.
+            photo_set = verify_photo_set(photo_set, self._photo_probe())
+
         return normalize_photo_list(photo_urls_for(photo_set, self.base_url))
+
+    def _photo_probe(self) -> PlaceholderProbe:
+        if self._probe is None:
+            self._probe = PlaceholderProbe(self.session, self.base_url)
+        return self._probe

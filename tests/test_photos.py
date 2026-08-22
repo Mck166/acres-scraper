@@ -11,6 +11,7 @@ import pytest
 
 from scraper.photos import (
     PhotoSet,
+    PlaceholderProbe,
     build_photo_url,
     derive_photo_urls,
     extract_cache_hash,
@@ -19,6 +20,7 @@ from scraper.photos import (
     normalize_photo_list,
     parse_photo_url,
     photo_urls_for,
+    verify_photo_set,
 )
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "pages" / "cutsheet_202603269_49photos.html"
@@ -114,6 +116,83 @@ def test_normalize_photo_list_decodes_escaped_ampersands():
 def test_normalize_photo_list_handles_empties():
     assert normalize_photo_list(None) == []
     assert normalize_photo_list([None, "", "  "]) == []
+
+
+class FakeImageSession:
+    """Serves a run of distinct images and a placeholder past the end."""
+
+    PLACEHOLDER = b"placeholder-bytes"
+
+    def __init__(self, real_photos: int):
+        self.real_photos = real_photos
+        self.requests = 0
+
+    def get(self, url, timeout=None, stream=False):
+        self.requests += 1
+        index = int(parse_photo_url(url)["index"])
+        content = self.PLACEHOLDER if index > self.real_photos else f"photo-{index}".encode()
+        return FakeImageResponse(content)
+
+
+class FakeImageResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+        self.status_code = 200
+        self.headers = {}
+
+    def iter_content(self, size):
+        yield self.content
+
+    def close(self):
+        pass
+
+
+def test_probe_accepts_a_correct_count():
+    session = FakeImageSession(real_photos=12)
+    probe = PlaceholderProbe(session)
+    photo_set = PhotoSet(listing_id="202600001", class_id="1", count=12, cch="abc")
+
+    assert probe.verified_count(photo_set) == 12
+
+
+def test_probe_trims_an_overstated_count():
+    """Listings occasionally advertise one more photo than they serve."""
+    session = FakeImageSession(real_photos=50)
+    probe = PlaceholderProbe(session)
+    photo_set = PhotoSet(listing_id="202617893", class_id="1", count=51, cch="58cc582b")
+
+    assert probe.verified_count(photo_set) == 50
+
+
+def test_probe_bisects_rather_than_walking_back():
+    session = FakeImageSession(real_photos=3)
+    probe = PlaceholderProbe(session)
+    photo_set = PhotoSet(listing_id="202600001", class_id="1", count=100, cch="abc")
+
+    assert probe.verified_count(photo_set) == 3
+    assert session.requests < 20, "the search should bisect, not scan"
+
+
+def test_verify_photo_set_trims_to_the_real_count():
+    session = FakeImageSession(real_photos=7)
+    probe = PlaceholderProbe(session)
+    photo_set = PhotoSet(listing_id="202600001", class_id="1", count=9, cch="abc")
+
+    verified = verify_photo_set(photo_set, probe)
+    assert verified.count == 7
+    assert verified.listing_id == photo_set.listing_id
+    assert verified.cch == photo_set.cch
+
+
+def test_probe_trusts_the_count_when_it_cannot_reach_the_site():
+    """A network failure must not silently empty a listing's photos."""
+
+    class DeadSession:
+        def get(self, *args, **kwargs):
+            raise OSError("network down")
+
+    photo_set = PhotoSet(listing_id="202600001", class_id="1", count=20, cch="abc")
+    assert PlaceholderProbe(DeadSession()).verified_count(photo_set) == 20
 
 
 def test_stored_production_urls_are_still_parseable(golden_docs):
