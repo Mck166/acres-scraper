@@ -19,12 +19,24 @@ from pymongo.errors import DuplicateKeyError
 
 from .config import Settings, get_settings
 from .identity import resolve_listing_id
-from .normalize import STATUS_SOLD, is_sold_status, parse_price, utcnow
+from .normalize import (
+    STATUS_EXPIRED,
+    STATUS_SOLD,
+    is_off_market_status,
+    is_sold_status,
+    parse_price,
+    utcnow,
+)
 
 CHANGE_NEW = "new"
 CHANGE_PRICE = "price"
 CHANGE_SOLD = "sold"
+CHANGE_DELISTED = "delisted"
 CHANGE_NONE = "none"
+
+# Changes worth telling the app about. A delisting is not one of them: there is
+# nothing for a user to swipe on, the listing simply stops appearing.
+NOTIFIABLE_CHANGES = (CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD)
 
 
 @dataclass
@@ -40,7 +52,7 @@ class SaveResult:
 
     @property
     def is_change(self) -> bool:
-        return self.action in (CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD)
+        return self.action != CHANGE_NONE
 
 
 @dataclass
@@ -53,23 +65,39 @@ class RunSummary:
     new_listings: int = 0
     price_changes: int = 0
     sold: int = 0
+    delisted: int = 0
     unchanged: int = 0
     relisted: int = 0
+    skipped: int = 0
+    detail_fetches: int = 0
     stale_rechecked: int = 0
     errors: List[str] = field(default_factory=list)
 
-    def record(self, result: SaveResult) -> None:
-        self.listings_seen += 1
+    def record(self, result: SaveResult, seen: bool = True) -> None:
+        """Count an outcome.
+
+        `seen` is false for the stale re-check, which revisits listings we
+        already hold rather than seeing them on the activity feed.
+        """
+        if seen:
+            self.listings_seen += 1
         if result.action == CHANGE_NEW:
             self.new_listings += 1
         elif result.action == CHANGE_PRICE:
             self.price_changes += 1
         elif result.action == CHANGE_SOLD:
             self.sold += 1
+        elif result.action == CHANGE_DELISTED:
+            self.delisted += 1
         else:
             self.unchanged += 1
         if result.relisted:
             self.relisted += 1
+
+    @property
+    def writes(self) -> int:
+        """How many listings this run actually changed."""
+        return self.new_listings + self.price_changes + self.sold + self.delisted
 
     def to_document(self) -> Dict[str, Any]:
         finished = self.finished_at or utcnow()
@@ -81,8 +109,11 @@ class RunSummary:
             "new_listings": self.new_listings,
             "price_changes": self.price_changes,
             "sold": self.sold,
+            "delisted": self.delisted,
             "unchanged": self.unchanged,
             "relisted": self.relisted,
+            "skipped": self.skipped,
+            "detail_fetches": self.detail_fetches,
             "stale_rechecked": self.stale_rechecked,
             "errors": self.errors,
         }
@@ -173,11 +204,28 @@ class Store:
         query = clauses[0] if len(clauses) == 1 else {"$or": clauses}
         return collection.find_one(query)
 
+    SNAPSHOT_PROJECTION = {
+        "listing_id": 1,
+        "url": 1,
+        "Status": 1,
+        "Price": 1,
+        "price_value": 1,
+        "PID": 1,
+        "date_added": 1,
+        "date_updated": 1,
+    }
+
     def active_snapshot(self) -> Dict[str, dict]:
         """Lightweight view of every active listing, keyed by listing id."""
-        projection = {"listing_id": 1, "url": 1, "Status": 1, "Price": 1, "price_value": 1, "date_updated": 1}
+        return self._snapshot(self.properties)
+
+    def archived_snapshot(self) -> Dict[str, dict]:
+        """Lightweight view of every archived listing, keyed by listing id."""
+        return self._snapshot(self.sold)
+
+    def _snapshot(self, collection) -> Dict[str, dict]:
         snapshot: Dict[str, dict] = {}
-        for doc in self.properties.find({}, projection):
+        for doc in collection.find({}, self.SNAPSHOT_PROJECTION):
             listing_id = resolve_listing_id(doc)
             if listing_id:
                 snapshot[listing_id] = doc
@@ -225,6 +273,7 @@ class Store:
             document.setdefault("sold_at", now)
             document.setdefault("sold_price", parse_price(document.get("Price")))
             document["archived_at"] = now
+            document.setdefault("archived_reason", "sold")
 
         try:
             result = collection.insert_one(document)
@@ -241,7 +290,8 @@ class Store:
             listing_id=resolve_listing_id(document),
             action=CHANGE_SOLD if sold_now else CHANGE_NEW,
             property_id=property_id,
-            new_price=parse_price(document.get("Price")),
+            # What a sold card should say is what it sold for, not what it asked.
+            new_price=document["sold_price"] if sold_now else parse_price(document.get("Price")),
             relisted=relisted,
         )
 
@@ -271,17 +321,13 @@ class Store:
             update["price_history"] = history
             update["price_changed_at"] = now
 
-        if sold_now and not was_sold:
-            return self._archive(existing, update, now, old_price, new_price)
+        if is_off_market_status(document.get("Status")) and not was_sold:
+            reason = "sold" if sold_now else "expired"
+            return self._archive(existing, update, now, old_price, new_price, reason=reason)
 
         self.properties.update_one({"_id": existing["_id"]}, {"$set": update})
 
-        if price_changed:
-            action = CHANGE_PRICE
-        elif sold_now:
-            action = CHANGE_NONE
-        else:
-            action = CHANGE_NONE
+        action = CHANGE_PRICE if price_changed else CHANGE_NONE
 
         return SaveResult(
             listing_id=resolve_listing_id(existing) or resolve_listing_id(document),
@@ -298,15 +344,27 @@ class Store:
         now: datetime,
         old_price: Optional[float],
         new_price: Optional[float],
+        reason: str = "sold",
     ) -> SaveResult:
-        """Move a listing into the sold archive, keeping its ``_id``."""
+        """Move a listing out of the active collection, keeping its ``_id``.
+
+        The id is preserved because ``favorites`` and ``dislikes`` reference
+        properties by it; changing it would orphan every saved home.
+        """
         archived = dict(existing)
         archived.update(update)
         archived["_id"] = existing["_id"]
-        archived["Status"] = STATUS_SOLD
-        archived["sold_at"] = now
-        archived["sold_price"] = new_price if new_price is not None else old_price
         archived["archived_at"] = now
+        archived["archived_reason"] = reason
+
+        if reason == "sold":
+            archived["Status"] = STATUS_SOLD
+            archived["sold_at"] = now
+            if archived.get("sold_price") is None:
+                archived["sold_price"] = new_price if new_price is not None else old_price
+        else:
+            archived["Status"] = STATUS_EXPIRED
+            archived["delisted_at"] = now
 
         date_added = existing.get("date_added")
         if isinstance(date_added, datetime):
@@ -317,10 +375,37 @@ class Store:
 
         return SaveResult(
             listing_id=resolve_listing_id(archived),
-            action=CHANGE_SOLD,
+            action=CHANGE_SOLD if reason == "sold" else CHANGE_DELISTED,
             property_id=existing["_id"],
             old_price=old_price,
-            new_price=archived["sold_price"],
+            new_price=archived.get("sold_price"),
+        )
+
+    def archive_listing(
+        self,
+        existing: dict,
+        reason: str = "sold",
+        sold_price: Optional[float] = None,
+        price: Optional[str] = None,
+    ) -> SaveResult:
+        """Retire a listing we already hold, without re-fetching it.
+
+        Used when the activity feed reports a sale or a delisting: everything
+        needed is already stored, so only the outcome is applied.
+        """
+        update: Dict[str, Any] = {"date_updated": utcnow()}
+        if price:
+            update["Price"] = price
+        if sold_price is not None:
+            update["sold_price"] = sold_price
+
+        return self._archive(
+            existing,
+            update,
+            utcnow(),
+            old_price=parse_price(existing.get("Price")),
+            new_price=sold_price,
+            reason=reason,
         )
 
     def _refresh_archived(self, archived: dict, document: Dict[str, Any], now: datetime) -> SaveResult:
@@ -393,7 +478,7 @@ class Store:
 
     def record_change(self, result: SaveResult, document: Dict[str, Any]) -> None:
         """Log a change so the app's swipe deck can find it for 24 hours."""
-        if not result.is_change:
+        if result.action not in NOTIFIABLE_CHANGES:
             return
 
         source = self.settings.sold_collection if result.action == CHANGE_SOLD else self.settings.properties_collection
