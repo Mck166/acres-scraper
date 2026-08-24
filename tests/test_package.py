@@ -15,6 +15,7 @@ MODULES = [
     "scraper.sync",
     "scraper.selenium_client",
     "scraper.run",
+    "scraper.inventory",
 ]
 
 

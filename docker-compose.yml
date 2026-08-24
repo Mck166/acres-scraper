@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   prop-scraper:
     build:
@@ -7,20 +5,16 @@ services:
       dockerfile: Dockerfile
     container_name: prop-scraper
     restart: unless-stopped
-    environment:
-      - VIEWPOINT_USER=${VIEWPOINT_USER}
-      - VIEWPOINT_PASS=${VIEWPOINT_PASS}
-      - MONGODB_URI=${MONGODB_URI}
-      - MONGODB_DB_NAME=${MONGODB_DB_NAME:-viewpoint_properties}
-      - MONGODB_COLLECTION_NAME=${MONGODB_COLLECTION_NAME:-properties}
-      - MONGODB_SOLD_COLLECTION_NAME=${MONGODB_SOLD_COLLECTION_NAME:-sold_properties}
-      - MONGODB_RECENT_UPDATES_COLLECTION_NAME=${MONGODB_RECENT_UPDATES_COLLECTION_NAME:-recent_updates}
-      - SCRAPER_TRANSPORT=${SCRAPER_TRANSPORT:-api}
-      - STALE_RECHECK_LIMIT=${STALE_RECHECK_LIMIT:-25}
-      # Told to rebuild its catalogue at the end of a run that changed anything.
-      - ACRES_API_URL=${ACRES_API_URL:-}
     env_file:
       - .env
+    environment:
+      # Defaults only — credentials come from .env above, not host substitution.
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-viewpoint_properties}
+      MONGODB_COLLECTION_NAME: ${MONGODB_COLLECTION_NAME:-properties}
+      MONGODB_SOLD_COLLECTION_NAME: ${MONGODB_SOLD_COLLECTION_NAME:-sold_properties}
+      MONGODB_RECENT_UPDATES_COLLECTION_NAME: ${MONGODB_RECENT_UPDATES_COLLECTION_NAME:-recent_updates}
+      SCRAPER_TRANSPORT: ${SCRAPER_TRANSPORT:-api}
+      STALE_RECHECK_LIMIT: ${STALE_RECHECK_LIMIT:-25}
     volumes:
       # Mount logs directory to persist logs
       - ./logs:/app/logs

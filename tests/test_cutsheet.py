@@ -8,7 +8,14 @@ import pathlib
 
 import pytest
 
-from scraper.cutsheet import parse_bootstrap, parse_cutsheet, parse_detail_items, parse_overlay
+from scraper.cutsheet import (
+    description_from_api,
+    parse_bootstrap,
+    parse_cutsheet,
+    parse_description,
+    parse_detail_items,
+    parse_overlay,
+)
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "pages" / "cutsheet_202603269_49photos.html"
 
@@ -99,13 +106,53 @@ def test_overlay_reads_the_hero_banner(html):
     assert overlay["Status"] == "Sold"
 
 
-def test_parse_cutsheet_returns_all_three_parts(html):
+def test_parse_cutsheet_returns_all_four_parts(html):
     parsed = parse_cutsheet(html)
-    assert set(parsed) == {"bootstrap", "details", "overlay"}
+    assert set(parsed) == {"bootstrap", "details", "overlay", "description"}
     assert parsed["bootstrap"] and parsed["details"] and parsed["overlay"]
+    assert parsed["description"]
 
 
 def test_parsers_tolerate_empty_input():
     assert parse_detail_items("") == {}
     assert parse_overlay("") == {}
-    assert parse_cutsheet("") == {"bootstrap": {}, "details": {}, "overlay": {}}
+    assert parse_description("") == ""
+    assert parse_cutsheet("") == {
+        "bootstrap": {},
+        "details": {},
+        "overlay": {},
+        "description": "",
+    }
+
+
+def test_description_reads_the_full_span(html):
+    description = parse_description(html)
+    assert description.startswith("Own a true piece of Baddeck history")
+    assert "Cabot Trail" in description
+    assert "..." not in description.split("Manse")[0]
+
+
+def test_description_falls_back_to_json_ld():
+    html = """
+    <html><body>
+      <script type="application/ld+json">
+        {"@type": "House", "description": "A quiet lot on the bay."}
+      </script>
+    </body></html>
+    """
+    assert parse_description(html) == "A quiet lot on the bay."
+
+
+def test_description_skips_unrendered_templates():
+    html = '<span class="full-description">{{info.description}}</span>'
+    assert parse_description(html) == ""
+
+
+def test_description_from_api_reads_the_cutsheet_payload():
+    body = {
+        "status": "success",
+        "cutsheet": {"description": "Life is a beach!!  Two acres of frontage."},
+    }
+    assert description_from_api(body) == "Life is a beach!! Two acres of frontage."
+    assert description_from_api({"description": "A cottage."}) == "A cottage."
+    assert description_from_api({}) == ""

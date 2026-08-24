@@ -1,11 +1,13 @@
 """Parser for viewpoint cutsheet pages.
 
-A cutsheet is server-rendered and carries everything we need, in two places:
+A cutsheet is server-rendered and carries everything we need, in three places:
 
 * ``vp.initCutsheet({...})`` in a script tag, holding the listing's structured
   record: prices, dates, status, coordinates, bed and bath counts, photo count.
 * ``<div class="cutsheet-detail-item">Roof:<span>Metal</span></div>`` blocks
   holding the MLS detail fields the app's detail screen renders.
+* ``<span class="full-description">...</span>``, the marketing copy shown on
+  the listing. It is not a detail item and is not in the bootstrap JSON.
 
 The detail labels are Title Case in the markup but uppercased by CSS, and the
 original scraper stored what the browser displayed. The uppercase form is what
@@ -136,10 +138,70 @@ def parse_overlay(html: str) -> Dict[str, str]:
     return overlay
 
 
+def clean_description(value: Any) -> str:
+    """Collapse whitespace and drop empty or unrendered template text."""
+    if value is None:
+        return ""
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if not text or "{{" in text:
+        return ""
+    return text
+
+
+def description_from_api(body: Any) -> str:
+    """Read the marketing copy out of a ``listing/cutsheet`` JSON response."""
+    if not isinstance(body, dict):
+        return ""
+    cutsheet = body.get("cutsheet")
+    if isinstance(cutsheet, dict):
+        return clean_description(cutsheet.get("description"))
+    return clean_description(body.get("description"))
+
+
+def _description_from_json_ld(soup: BeautifulSoup) -> str:
+    for script in soup.select('script[type="application/ld+json"]'):
+        raw = script.string or script.get_text()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            continue
+        items = payload if isinstance(payload, list) else [payload]
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            text = clean_description(item.get("description"))
+            if text:
+                return text
+    return ""
+
+
+def parse_description(html: str) -> str:
+    """Read the listing's marketing description from the cutsheet page.
+
+    Prefers the full description span the page shows after "Read more". The
+    bootstrap record does not carry this field, and it is not a detail item.
+    Schema.org JSON-LD is a fallback for pages that omit the span.
+    """
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+    node = soup.select_one(".full-description")
+    if node is not None:
+        text = clean_description(node.get_text(" ", strip=True))
+        if text:
+            return text
+
+    return _description_from_json_ld(soup)
+
+
 def parse_cutsheet(html: str) -> Dict[str, Any]:
-    """Parse a cutsheet page into its bootstrap record and detail fields."""
+    """Parse a cutsheet page into its bootstrap record, details, and description."""
     return {
         "bootstrap": parse_bootstrap(html),
         "details": parse_detail_items(html),
         "overlay": parse_overlay(html),
+        "description": parse_description(html),
     }

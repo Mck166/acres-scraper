@@ -14,7 +14,9 @@ from typing import Any, Dict, Iterable, List, Optional
 from .geocode import CachedGeocoder
 from .normalize import (
     STATUS_EXPIRED,
+    STATUS_PENDING,
     STATUS_SOLD,
+    apply_listing_events,
     normalize_document,
     normalize_status,
     parse_price,
@@ -25,6 +27,7 @@ from .store import (
     CHANGE_DELISTED,
     CHANGE_NEW,
     CHANGE_NONE,
+    CHANGE_PENDING,
     CHANGE_PRICE,
     CHANGE_SOLD,
     RunSummary,
@@ -54,10 +57,10 @@ class Change:
         """Whether this change requires pulling the listing's full page.
 
         A listing we already hold carries everything needed to retire it, so a
-        sale or a delisting costs no request. Anything new, or anything whose
-        price moved, is fetched.
+        sale or a delisting costs no request. Anything new, repriced, or newly
+        pending is fetched so the MLS event dates land on the document.
         """
-        if self.kind in (CHANGE_NEW, CHANGE_PRICE):
+        if self.kind in (CHANGE_NEW, CHANGE_PRICE, CHANGE_PENDING):
             return True
         if self.kind == CHANGE_SOLD:
             return self.existing is None
@@ -115,6 +118,8 @@ def classify(
         return change(CHANGE_SOLD, old_price)
     if status == STATUS_EXPIRED:
         return change(CHANGE_DELISTED, old_price)
+    if status == STATUS_PENDING and normalize_status(active.get("Status")) != STATUS_PENDING:
+        return change(CHANGE_PENDING, old_price)
     if new_price is not None and old_price is not None and new_price != old_price:
         return change(CHANGE_PRICE, old_price)
 
@@ -158,6 +163,16 @@ def enrich_coordinates(document: Dict[str, Any], geocoder: Optional[CachedGeocod
     return document
 
 
+def merge_activity_dates(document: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill event dates from the activity feed when the cutsheet omitted them."""
+    if entry.get("list_dt") and not document.get("listed_on"):
+        document["listed_on"] = entry["list_dt"]
+    if entry.get("sold_dt") and not document.get("sold_on"):
+        document["sold_on"] = entry["sold_dt"]
+    apply_listing_events(document, entry.get("events") or [])
+    return document
+
+
 def build_document(
     client,
     change: Change,
@@ -168,6 +183,7 @@ def build_document(
     if not raw:
         return None
 
+    merge_activity_dates(raw, change.entry)
     document = normalize_document(raw, url=change.url)
     return enrich_coordinates(document, geocoder)
 

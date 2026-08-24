@@ -207,12 +207,13 @@ class ViewpointClient:
         params: Optional[Dict[str, Any]] = None,
         post: bool = False,
         needs_nonce: bool = True,
+        max_attempts: int = MAX_ATTEMPTS,
     ) -> Dict[str, Any]:
         """Make one API call, retrying transient failures."""
         url = f"{self.base_url}/api/v2/{controller}/{method}"
         last_error: Optional[Exception] = None
 
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        for attempt in range(1, max_attempts + 1):
             payload: Dict[str, Any] = dict(params or {})
             payload["CLIENT_VER"] = self.client_ver
             if needs_nonce:
@@ -343,6 +344,8 @@ class ViewpointClient:
 
         overlay = parts["overlay"]
         raw["Address"] = self._address_of(bootstrap) or overlay.get("Address", "")
+        if parts.get("description"):
+            raw["Description"] = parts["description"]
 
         status = status_from_id(bootstrap.get("status_id"))
         raw["Status"] = status or overlay.get("Status", "")
@@ -366,9 +369,13 @@ class ViewpointClient:
             ("sold_dt", "sold_on"),
             ("close_dt", "closes_on"),
             ("update_dt", "source_updated_at"),
+            ("status_dt", "status_changed_on"),
         ):
             if bootstrap.get(source):
                 raw[target] = bootstrap[source]
+
+        if str(bootstrap.get("status_id") or "") == "6" and bootstrap.get("status_dt"):
+            raw["pending_on"] = bootstrap["status_dt"]
 
         raw["Photos"] = self._photos_for(html, bootstrap, listing_id, class_id)
         raw["Photo_Count"] = len(raw["Photos"])

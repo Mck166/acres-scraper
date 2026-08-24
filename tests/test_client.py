@@ -185,6 +185,9 @@ def test_fetch_listing_builds_a_complete_document(client, monkeypatch):
     assert raw["BASEMENT"] == "Full, Partial, Crawl Space, Other"
     assert raw["latitude"] == "46.10131396"
     assert raw["longitude"] == "-60.74911817"
+    assert raw["Description"].startswith("Own a true piece of Baddeck history")
+    assert raw["listed_on"] == "2026-02-23 00:00:00"
+    assert raw["sold_on"] == "2026-08-22 00:00:00"
 
 
 def test_fetch_listing_recovers_every_photo(client, monkeypatch):

@@ -126,6 +126,17 @@ def test_an_abandoned_lock_expires_instead_of_blocking_forever(store, stub_clien
     assert store.scrape_runs.count_documents({}) == 1
 
 
+def test_refresh_lock_extends_the_expiry(store):
+    assert store.acquire_lock(LOCK_NAME, 60)
+    original = store.locks.find_one({"_id": LOCK_NAME})["expires_at"]
+
+    assert store.refresh_lock(LOCK_NAME, 3600)
+    refreshed = store.locks.find_one({"_id": LOCK_NAME})["expires_at"]
+
+    assert refreshed > original
+    store.release_lock(LOCK_NAME)
+
+
 def test_a_manual_run_can_skip_the_lock(store, stub_client):
     store.acquire_lock(LOCK_NAME, 3600)
 

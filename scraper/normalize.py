@@ -8,7 +8,8 @@ keys directly. Nothing here may rename an existing key.
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
+from zoneinfo import ZoneInfo
 
 from .identity import class_id_from_url, listing_id_from_url
 
@@ -19,6 +20,8 @@ STATUS_PENDING = "PENDING SALE"
 STATUS_SOLD = "SOLD"
 STATUS_EXPIRED = "EXPIRED"
 
+ATLANTIC = ZoneInfo("America/Halifax")
+
 # Viewpoint's numeric listing states, learned from its new-today change events
 # and confirmed against the status each cutsheet displays: a listing goes
 # None -> 5 when it lists, 5 -> 6 when it sells subject to conditions,
@@ -28,10 +31,24 @@ STATUS_IDS = {
     "2": STATUS_SOLD,      # Sold, closed
     "3": STATUS_EXPIRED,   # Cancelled
     "5": STATUS_FOR_SALE,  # Active
-    "6": STATUS_SOLD,      # Sold, not yet closed
+    "6": STATUS_PENDING,   # Sold subject to conditions
     "7": STATUS_FOR_SALE,  # Newly listed, price not yet published
     "8": STATUS_EXPIRED,   # Withdrawn
 }
+
+EVENT_PRICE = "1"
+EVENT_STATUS = "2"
+STATUS_ID_PENDING = "6"
+STATUS_ID_SOLD = "2"
+
+EVENT_DATE_FIELDS = (
+    "listed_on",
+    "sold_on",
+    "pending_on",
+    "price_changed_on",
+    "closes_on",
+    "source_updated_at",
+)
 
 
 def status_from_id(status_id: Any) -> Optional[str]:
@@ -104,6 +121,10 @@ def is_sold_status(value: Any) -> bool:
     return normalize_status(value) == STATUS_SOLD
 
 
+def is_pending_status(value: Any) -> bool:
+    return normalize_status(value) == STATUS_PENDING
+
+
 def is_off_market_status(value: Any) -> bool:
     """True when a listing should no longer appear as available."""
     return normalize_status(value) in (STATUS_SOLD, STATUS_EXPIRED)
@@ -112,6 +133,74 @@ def is_off_market_status(value: Any) -> bool:
 def utcnow() -> datetime:
     """Naive UTC, matching what Acres-API's parse_datetime expects."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def parse_viewpoint_datetime(value: Any) -> Optional[datetime]:
+    """Parse a Viewpoint timestamp as America/Halifax wall time.
+
+    The site sends naive strings. We keep them naive so Mongo and the API can
+    compare calendar dates in Atlantic Time without a timezone round-trip.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(ATLANTIC).replace(tzinfo=None)
+        return value
+
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def atlantic_today(now: Optional[datetime] = None):
+    """Today's calendar date in America/Halifax."""
+    if now is None:
+        current = datetime.now(ATLANTIC)
+    elif now.tzinfo is None:
+        current = now.replace(tzinfo=ATLANTIC)
+    else:
+        current = now.astimezone(ATLANTIC)
+    return current.date()
+
+
+def date_is_today(value: Any, now: Optional[datetime] = None) -> bool:
+    parsed = parse_viewpoint_datetime(value)
+    if parsed is None:
+        return False
+    return parsed.date() == atlantic_today(now)
+
+
+def apply_listing_events(document: Dict[str, Any], events: Optional[Iterable[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Copy price and status events onto the listing document."""
+    history = list(document.get("price_history") or [])
+    for event in events or []:
+        event_id = str(event.get("event_id") or "")
+        when = parse_viewpoint_datetime(event.get("event_time") or event.get("created"))
+        if event_id == EVENT_PRICE:
+            if when is not None:
+                document["price_changed_on"] = when
+            old_price = parse_price(event.get("oldvalue"))
+            history.append(
+                {
+                    "price": format_price(old_price) if old_price is not None else event.get("oldvalue"),
+                    "price_value": old_price,
+                    "date": when,
+                }
+            )
+        elif event_id == EVENT_STATUS:
+            newvalue = str(event.get("newvalue") or "").strip()
+            if newvalue == STATUS_ID_PENDING and when is not None:
+                document["pending_on"] = when
+            elif newvalue == STATUS_ID_SOLD and when is not None:
+                document["sold_on"] = when
+    if history:
+        document["price_history"] = history
+    return document
 
 
 DEFAULT_LOOKBACK_HOURS = 24
@@ -189,5 +278,18 @@ def normalize_document(raw: Dict[str, Any], url: Optional[str] = None) -> Dict[s
         photos = []
     doc["Photos"] = photos
     doc["Photo_Count"] = len(photos)
+
+    for field in EVENT_DATE_FIELDS:
+        if field in doc:
+            parsed = parse_viewpoint_datetime(doc.get(field))
+            if parsed is not None:
+                doc[field] = parsed
+            elif not doc.get(field):
+                doc.pop(field, None)
+
+    if is_pending_status(doc.get("Status")) and not doc.get("pending_on"):
+        pending = parse_viewpoint_datetime(doc.get("status_changed_on") or doc.get("status_dt"))
+        if pending is not None:
+            doc["pending_on"] = pending
 
     return doc

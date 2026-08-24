@@ -7,6 +7,7 @@ live apart from the sync engine. Each is safe to run repeatedly.
 import logging
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from .cutsheet import description_from_api, parse_description
 from .identity import class_id_from_url, resolve_listing_id
 from .normalize import is_sold_status, parse_price, utcnow
 from .photos import (
@@ -173,3 +174,117 @@ def copy_documents(source, target, documents: Iterable[Dict[str, Any]]) -> int:
         target.replace_one({"_id": doc["_id"]}, doc, upsert=True)
         count += 1
     return count
+
+
+DESCRIPTION_PROJECTION = {
+    "url": 1,
+    "listing_id": 1,
+    "listing_class_id": 1,
+    "Description": 1,
+}
+
+LOCK_REFRESH_EVERY = 25
+
+
+def _missing_description_query() -> dict:
+    return {
+        "$or": [
+            {"Description": {"$exists": False}},
+            {"Description": None},
+            {"Description": ""},
+        ]
+    }
+
+
+def find_listings_for_description_backfill(
+    collection, resume: bool = False, limit: Optional[int] = None
+) -> List[dict]:
+    """Documents that a description backfill should visit."""
+    query: Dict[str, Any] = {"url": {"$exists": True, "$nin": [None, ""]}}
+    if resume:
+        query = {"$and": [query, _missing_description_query()]}
+    cursor = collection.find(query, DESCRIPTION_PROJECTION)
+    if limit:
+        cursor = cursor.limit(limit)
+    return list(cursor)
+
+
+def description_for_listing(client, doc: dict) -> str:
+    """Pull a listing's description, preferring the JSON cutsheet endpoint."""
+    listing_id = resolve_listing_id(doc)
+    class_id = str(doc.get("listing_class_id") or class_id_from_url(doc.get("url")))
+    url = doc.get("url")
+
+    if listing_id and hasattr(client, "listing_cutsheet"):
+        try:
+            body = client.listing_cutsheet(listing_id, class_id)
+            text = description_from_api(body)
+            if text:
+                return text
+        except Exception as exc:
+            log.debug("cutsheet API failed for %s: %s", listing_id, exc)
+
+    html = None
+    if url and hasattr(client, "fetch_page"):
+        try:
+            html = client.fetch_page(url)
+        except Exception as exc:
+            log.debug("Could not fetch %s: %s", url, exc)
+    elif url and hasattr(client, "driver") and client.driver is not None:
+        try:
+            client.driver.get(url)
+            html = client.driver.page_source
+        except Exception as exc:
+            log.debug("Could not open %s: %s", url, exc)
+
+    if html:
+        return parse_description(html)
+    return ""
+
+
+def backfill_descriptions(
+    client,
+    collection,
+    limit: Optional[int] = None,
+    dry_run: bool = False,
+    resume: bool = False,
+    on_progress: Optional[Callable[[int, dict], None]] = None,
+) -> Dict[str, int]:
+    """Set ``Description`` on stored listings without rewriting the rest."""
+    docs = find_listings_for_description_backfill(collection, resume=resume, limit=limit)
+    log.info("Found %d listings to visit for descriptions", len(docs))
+
+    summary = {"examined": 0, "updated": 0, "unchanged": 0, "skipped": 0, "failed": 0}
+
+    for index, doc in enumerate(docs, start=1):
+        summary["examined"] += 1
+        if on_progress is not None:
+            on_progress(index, doc)
+
+        url = doc.get("url")
+        if not url:
+            summary["failed"] += 1
+            continue
+
+        try:
+            text = description_for_listing(client, doc)
+        except Exception as exc:
+            log.error("Could not read description for %s: %s", url, exc)
+            summary["failed"] += 1
+            continue
+
+        if not text:
+            summary["failed"] += 1
+            log.info("%s: no description found", url)
+            continue
+
+        if text == doc.get("Description"):
+            summary["unchanged"] += 1
+            continue
+
+        if not dry_run:
+            collection.update_one({"_id": doc["_id"]}, {"$set": {"Description": text}})
+        summary["updated"] += 1
+        log.info("%s: stored description (%d chars)", url, len(text))
+
+    return summary

@@ -30,6 +30,7 @@ from .normalize import (
 
 CHANGE_NEW = "new"
 CHANGE_PRICE = "price"
+CHANGE_PENDING = "pending"
 CHANGE_SOLD = "sold"
 CHANGE_DELISTED = "delisted"
 CHANGE_NONE = "none"
@@ -169,6 +170,14 @@ class Store:
 
     # -- schema ----------------------------------------------------------
 
+    def _ensure_ttl_index(self, collection, field: str, expire_seconds: int) -> None:
+        """Create a TTL index, replacing one that exists with different options."""
+        name = f"{field}_1"
+        existing = collection.index_information().get(name)
+        if existing is not None and existing.get("expireAfterSeconds") != expire_seconds:
+            collection.drop_index(name)
+        collection.create_index(field, expireAfterSeconds=expire_seconds)
+
     def ensure_indexes(self) -> None:
         for collection in (self.properties, self.sold):
             collection.create_index("listing_id", unique=True, sparse=True)
@@ -177,12 +186,18 @@ class Store:
             collection.create_index("url")
             collection.create_index("date_added")
             collection.create_index("date_updated")
+            collection.create_index("listed_on")
+            collection.create_index("price_changed_on")
+            collection.create_index("pending_on")
+            collection.create_index("sold_on")
 
-        self.recent_updates.create_index("changed_at", expireAfterSeconds=self.settings.recent_updates_ttl_seconds)
+        self._ensure_ttl_index(
+            self.recent_updates, "changed_at", self.settings.recent_updates_ttl_seconds
+        )
         self.recent_updates.create_index("property_id")
         self.recent_updates.create_index("listing_id")
         self.sold.create_index("sold_at")
-        self.locks.create_index("expires_at", expireAfterSeconds=0)
+        self._ensure_ttl_index(self.locks, "expires_at", 0)
 
     # -- lookups ---------------------------------------------------------
 
@@ -283,7 +298,10 @@ class Store:
             existing = self._find_in(collection, resolve_listing_id(document), document.get("url"))
             if existing is None:
                 raise
-            collection.update_one({"_id": existing["_id"]}, {"$set": document})
+            collection.replace_one(
+                {"_id": existing["_id"]},
+                {**existing, **{k: v for k, v in document.items() if k != "_id"}, "_id": existing["_id"]},
+            )
             property_id = existing["_id"]
 
         return SaveResult(
@@ -310,22 +328,31 @@ class Store:
             old_price is not None and new_price is not None and old_price != new_price
         )
         if price_changed:
-            history = list(existing.get("price_history") or [])
-            history.append(
-                {
-                    "price": existing.get("Price"),
-                    "price_value": old_price,
-                    "date": existing.get("date_updated") or existing.get("date_added") or now,
-                }
-            )
-            update["price_history"] = history
             update["price_changed_at"] = now
+            if not document.get("price_changed_on"):
+                update["price_changed_on"] = now
+            if not document.get("price_history"):
+                history = list(existing.get("price_history") or [])
+                history.append(
+                    {
+                        "price": existing.get("Price"),
+                        "price_value": old_price,
+                        "date": existing.get("price_changed_on")
+                        or existing.get("date_updated")
+                        or existing.get("date_added")
+                        or now,
+                    }
+                )
+                update["price_history"] = history
 
         if is_off_market_status(document.get("Status")) and not was_sold:
             reason = "sold" if sold_now else "expired"
             return self._archive(existing, update, now, old_price, new_price, reason=reason)
 
-        self.properties.update_one({"_id": existing["_id"]}, {"$set": update})
+        merged = dict(existing)
+        merged.update(update)
+        merged["_id"] = existing["_id"]
+        self.properties.replace_one({"_id": existing["_id"]}, merged)
 
         action = CHANGE_PRICE if price_changed else CHANGE_NONE
 
@@ -436,7 +463,10 @@ class Store:
         update = {key: value for key, value in document.items() if key != "_id"}
         update.pop("date_added", None)
         update["date_updated"] = now
-        self.sold.update_one({"_id": archived["_id"]}, {"$set": update})
+        merged = dict(archived)
+        merged.update(update)
+        merged["_id"] = archived["_id"]
+        self.sold.replace_one({"_id": archived["_id"]}, merged)
         return SaveResult(
             listing_id=resolve_listing_id(archived),
             action=CHANGE_NONE,
@@ -512,6 +542,17 @@ class Store:
             return True
         except DuplicateKeyError:
             return False
+
+    def refresh_lock(self, name: str, ttl_seconds: int = 3600) -> bool:
+        """Extend a held lock. Re-acquires if the TTL already dropped it."""
+        now = utcnow()
+        result = self.locks.update_one(
+            {"_id": name},
+            {"$set": {"expires_at": now + timedelta(seconds=ttl_seconds)}},
+        )
+        if result.matched_count:
+            return True
+        return self.acquire_lock(name, ttl_seconds)
 
     def release_lock(self, name: str) -> None:
         self.locks.delete_one({"_id": name})

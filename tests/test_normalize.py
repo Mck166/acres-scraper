@@ -17,14 +17,17 @@ from scraper.normalize import (
     STATUS_FOR_SALE,
     STATUS_PENDING,
     STATUS_SOLD,
+    apply_listing_events,
     as_since,
     coerce_coordinate,
     format_price,
     is_off_market_status,
+    is_pending_status,
     is_sold_status,
     normalize_document,
     normalize_status,
     parse_price,
+    parse_viewpoint_datetime,
     status_from_id,
 )
 
@@ -37,6 +40,7 @@ CORE_FIELDS = {
     "Price",
     "Status",
     "Address",
+    "Description",
     "Photos",
     "Photo_Count",
     "latitude",
@@ -220,7 +224,7 @@ def test_raw_status_is_kept_for_reference():
         ("2", STATUS_SOLD),
         ("3", STATUS_EXPIRED),
         ("5", STATUS_FOR_SALE),
-        ("6", STATUS_SOLD),
+        ("6", STATUS_PENDING),
         (5, STATUS_FOR_SALE),
         ("999", None),
         (None, None),
@@ -233,9 +237,52 @@ def test_status_from_id(status_id, expected):
 def test_sold_and_off_market_helpers():
     assert is_sold_status("Sold")
     assert not is_sold_status("FOR SALE")
+    assert not is_sold_status("PENDING SALE")
+    assert is_pending_status("PENDING SALE")
     assert is_off_market_status("Expired")
     assert is_off_market_status("Sold")
+    assert not is_off_market_status("PENDING SALE")
     assert not is_off_market_status("FOR SALE")
+
+
+def test_viewpoint_datetimes_are_atlantic_wall_clocks():
+    parsed = parse_viewpoint_datetime("2026-08-21 08:18:02")
+    assert parsed == datetime(2026, 8, 21, 8, 18, 2)
+
+
+def test_normalize_document_parses_event_dates():
+    normalized = normalize_document(
+        {
+            "listed_on": "2026-02-23 00:00:00",
+            "pending_on": "2026-08-21 12:19:28",
+            "Status": "PENDING SALE",
+        }
+    )
+    assert normalized["listed_on"] == datetime(2026, 2, 23, 0, 0, 0)
+    assert normalized["pending_on"] == datetime(2026, 8, 21, 12, 19, 28)
+
+
+def test_apply_listing_events_sets_price_and_pending_dates():
+    document = apply_listing_events(
+        {},
+        [
+            {
+                "event_id": "1",
+                "event_time": "2026-08-21 08:18:02",
+                "oldvalue": "219000",
+                "newvalue": "199000",
+            },
+            {
+                "event_id": "2",
+                "event_time": "2026-08-21 09:00:00",
+                "oldvalue": "5",
+                "newvalue": "6",
+            },
+        ],
+    )
+    assert document["price_changed_on"] == datetime(2026, 8, 21, 8, 18, 2)
+    assert document["pending_on"] == datetime(2026, 8, 21, 9, 0, 0)
+    assert document["price_history"][0]["price_value"] == 219000.0
 
 
 # -- coordinates ---------------------------------------------------------

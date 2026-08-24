@@ -8,18 +8,19 @@ from datetime import timedelta
 
 import pytest
 
-from scraper.normalize import STATUS_EXPIRED, STATUS_FOR_SALE, STATUS_SOLD, utcnow
+from scraper.normalize import STATUS_EXPIRED, STATUS_FOR_SALE, STATUS_PENDING, STATUS_SOLD, utcnow
 from scraper.store import (
     CHANGE_DELISTED,
     CHANGE_NEW,
     CHANGE_NONE,
+    CHANGE_PENDING,
     CHANGE_PRICE,
     CHANGE_SOLD,
     RunSummary,
 )
 from scraper.sync import Change, apply_change, classify, plan_changes, stale_recheck, sync
 
-ACTIVE, SOLD_PENDING, SOLD_CLOSED, EXPIRED = "5", "6", "2", "1"
+ACTIVE, PENDING, SOLD_CLOSED, EXPIRED = "5", "6", "2", "1"
 
 
 def entry(listing_id="202600001", status_id=ACTIVE, list_price="400000", sold_price=None, **extra):
@@ -76,10 +77,25 @@ def test_a_price_rise_is_a_price_change():
     assert change.new_price == 425000
 
 
-@pytest.mark.parametrize("status_id", [SOLD_PENDING, SOLD_CLOSED])
-def test_both_sold_states_count_as_sold(status_id):
+def test_a_pending_offer_is_kept_active_and_fetched():
+    change = classify(entry(status_id=PENDING), active=stored(), archived=None)
+    assert change.kind == CHANGE_PENDING
+    assert change.status == STATUS_PENDING
+    assert change.needs_detail
+
+
+def test_an_already_pending_listing_is_left_alone():
     change = classify(
-        entry(status_id=status_id, sold_price="390000"), active=stored(), archived=None
+        entry(status_id=PENDING, list_price="400000"),
+        active=stored(price="$400,000", status=STATUS_PENDING),
+        archived=None,
+    )
+    assert change.kind == CHANGE_NONE
+
+
+def test_a_closed_sale_counts_as_sold():
+    change = classify(
+        entry(status_id=SOLD_CLOSED, sold_price="390000"), active=stored(), archived=None
     )
     assert change.kind == CHANGE_SOLD
     assert change.sold_price == 390000
@@ -270,6 +286,16 @@ def test_a_run_only_fetches_listings_that_actually_changed(store):
     assert len(client.fetches) == 1, "only the repriced listing should have been fetched"
     assert summary.price_changes == 1
     assert summary.skipped == 1
+
+
+def test_a_pending_listing_we_never_held_is_stored_active(store):
+    client = RecordingClient(statuses={"202600001": STATUS_PENDING})
+    summary = sync(client, store, activity=[entry("202600001", status_id=PENDING)], stale_limit=0)
+
+    assert summary.new_listings == 1
+    assert store.properties.count_documents({}) == 1
+    assert store.sold.count_documents({}) == 0
+    assert store.properties.find_one({"listing_id": "202600001"})["Status"] == STATUS_PENDING
 
 
 def test_recent_updates_records_only_notifiable_changes(store):
