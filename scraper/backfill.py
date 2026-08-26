@@ -9,7 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .cutsheet import description_from_api, parse_description
 from .identity import class_id_from_url, resolve_listing_id
-from .normalize import is_sold_status, parse_price, utcnow
+from .normalize import STATUS_PENDING, listing_is_sold, parse_price, utcnow
 from .photos import (
     PlaceholderProbe,
     extract_photo_set,
@@ -139,7 +139,7 @@ def archive_existing_sold(store, dry_run: bool = False) -> Dict[str, int]:
     now = utcnow()
 
     for doc in list(store.properties.find({})):
-        if not is_sold_status(doc.get("Status")):
+        if not listing_is_sold(doc):
             continue
 
         summary["examined"] += 1
@@ -163,6 +163,59 @@ def archive_existing_sold(store, dry_run: bool = False) -> Dict[str, int]:
         store.sold.replace_one({"_id": doc["_id"]}, archived, upsert=True)
         store.properties.delete_one({"_id": doc["_id"]})
         summary["archived"] += 1
+
+    return summary
+
+
+PENDING_STATUS_QUERY = {"$or": [{"status_id": "6"}, {"status_id": 6}]}
+PENDING_ARCHIVE_FIELDS = (
+    "sold_at",
+    "sold_price",
+    "archived_at",
+    "archived_reason",
+    "days_on_market",
+    "delisted_at",
+)
+
+
+def restore_misarchived_pending(store, dry_run: bool = False) -> Dict[str, int]:
+    """Move Viewpoint status-6 listings out of the sold archive.
+
+    Overlay text like "Sold Subject to Conditions" was stored as SOLD and
+    archived. Those homes are still pending and belong in ``properties``.
+    """
+    summary = {"examined": 0, "restored": 0}
+    now = utcnow()
+
+    for doc in list(store.sold.find(PENDING_STATUS_QUERY)):
+        summary["examined"] += 1
+        log.info(
+            "%s %s %s",
+            "would restore" if dry_run else "restoring",
+            doc.get("listing_id"),
+            doc.get("PID") or doc.get("Address"),
+        )
+        if dry_run:
+            summary["restored"] += 1
+            continue
+
+        revived = dict(doc)
+        revived["Status"] = STATUS_PENDING
+        revived["status_id"] = "6"
+        revived["date_updated"] = now
+        if not revived.get("pending_on"):
+            revived["pending_on"] = (
+                revived.get("status_changed_on")
+                or revived.get("source_updated_at")
+                or revived.get("sold_on")
+            )
+        revived.pop("sold_on", None)
+        for key in PENDING_ARCHIVE_FIELDS:
+            revived.pop(key, None)
+
+        store.properties.replace_one({"_id": doc["_id"]}, revived, upsert=True)
+        store.sold.delete_one({"_id": doc["_id"]})
+        summary["restored"] += 1
 
     return summary
 

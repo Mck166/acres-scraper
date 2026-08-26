@@ -22,8 +22,8 @@ from .identity import resolve_listing_id
 from .normalize import (
     STATUS_EXPIRED,
     STATUS_SOLD,
-    is_off_market_status,
-    is_sold_status,
+    listing_is_off_market,
+    listing_is_sold,
     parse_price,
     utcnow,
 )
@@ -267,7 +267,7 @@ class Store:
         now = utcnow()
 
         existing = self.find_active(listing_id, url) if listing_id or url else None
-        sold_now = is_sold_status(document.get("Status"))
+        sold_now = listing_is_sold(document)
 
         if existing is None:
             archived = self.find_sold(listing_id, url) if listing_id or url else None
@@ -318,7 +318,7 @@ class Store:
     ) -> SaveResult:
         old_price = parse_price(existing.get("Price"))
         new_price = parse_price(document.get("Price"))
-        was_sold = is_sold_status(existing.get("Status"))
+        was_sold = listing_is_sold(existing)
 
         update: Dict[str, Any] = {key: value for key, value in document.items() if key != "_id"}
         update.pop("date_added", None)
@@ -345,7 +345,7 @@ class Store:
                 )
                 update["price_history"] = history
 
-        if is_off_market_status(document.get("Status")) and not was_sold:
+        if listing_is_off_market(document) and not was_sold:
             reason = "sold" if sold_now else "expired"
             return self._archive(existing, update, now, old_price, new_price, reason=reason)
 
@@ -437,7 +437,7 @@ class Store:
 
     def _refresh_archived(self, archived: dict, document: Dict[str, Any], now: datetime) -> SaveResult:
         """A listing we already archived showed up again under the same id."""
-        if not is_sold_status(document.get("Status")):
+        if not listing_is_sold(document):
             # It came back on the market under its original listing id, so move
             # it back into the active collection rather than creating a twin.
             revived = dict(archived)
@@ -446,7 +446,7 @@ class Store:
             revived["date_updated"] = now
             revived["relisted"] = True
             revived["relisted_at"] = now
-            for key in ("sold_at", "sold_price", "archived_at", "days_on_market"):
+            for key in ("sold_at", "sold_price", "archived_at", "archived_reason", "days_on_market"):
                 revived.pop(key, None)
 
             self.properties.replace_one({"_id": archived["_id"]}, revived, upsert=True)

@@ -24,6 +24,9 @@ from scraper.normalize import (
     is_off_market_status,
     is_pending_status,
     is_sold_status,
+    listing_is_off_market,
+    listing_is_pending,
+    listing_is_sold,
     normalize_document,
     normalize_status,
     parse_price,
@@ -177,6 +180,9 @@ def test_format_price(value, expected):
         ("Expired", STATUS_EXPIRED),
         ("Cancelled", STATUS_EXPIRED),
         ("Pending", STATUS_PENDING),
+        ("Sold Subject to Conditions", STATUS_PENDING),
+        ("SOLD SUBJECT TO CONDITIONS", STATUS_PENDING),
+        ("Sold Conditional", STATUS_PENDING),
         ("", STATUS_FOR_SALE),
         (None, STATUS_FOR_SALE),
     ],
@@ -238,11 +244,49 @@ def test_sold_and_off_market_helpers():
     assert is_sold_status("Sold")
     assert not is_sold_status("FOR SALE")
     assert not is_sold_status("PENDING SALE")
+    assert not is_sold_status("Sold Subject to Conditions")
     assert is_pending_status("PENDING SALE")
+    assert is_pending_status("Sold Subject to Conditions")
     assert is_off_market_status("Expired")
     assert is_off_market_status("Sold")
     assert not is_off_market_status("PENDING SALE")
     assert not is_off_market_status("FOR SALE")
+    assert not is_off_market_status("Sold Subject to Conditions")
+
+
+def test_status_id_wins_over_overlay_sold():
+    """Viewpoint paints pending homes with a Sold overlay. The numeric id is the source of truth."""
+    normalized = normalize_document({"Status": "Sold", "status_id": "6"})
+    assert normalized["Status"] == STATUS_PENDING
+    assert normalized["status_id"] == "6"
+    assert listing_is_pending(normalized)
+    assert not listing_is_sold(normalized)
+    assert not listing_is_off_market(normalized)
+
+
+def test_pending_sold_dt_does_not_become_sold_on():
+    normalized = normalize_document(
+        {
+            "Status": "Sold",
+            "status_id": "6",
+            "sold_on": "2026-08-26 00:00:00",
+            "status_dt": "2026-08-26 10:41:59",
+        }
+    )
+    assert normalized["Status"] == STATUS_PENDING
+    assert "sold_on" not in normalized
+    assert normalized["pending_on"] == datetime(2026, 8, 26, 10, 41, 59)
+
+
+def test_listing_helpers_never_treat_status_id_6_as_sold():
+    pending = {"Status": "SOLD", "status_id": "6"}
+    assert listing_is_pending(pending)
+    assert not listing_is_sold(pending)
+    assert not listing_is_off_market(pending)
+
+    closed = {"Status": "SOLD", "status_id": "2"}
+    assert listing_is_sold(closed)
+    assert listing_is_off_market(closed)
 
 
 def test_viewpoint_datetimes_are_atlantic_wall_clocks():

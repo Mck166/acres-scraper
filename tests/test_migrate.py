@@ -11,7 +11,8 @@ import pathlib
 import pytest
 from bson import ObjectId
 
-from scraper.normalize import STATUS_FOR_SALE, STATUS_SOLD, utcnow
+from scraper.normalize import STATUS_FOR_SALE, STATUS_PENDING, STATUS_SOLD, utcnow
+from scraper.backfill import restore_misarchived_pending
 from tools.migrate import (
     backup,
     duplicate_listing_ids,
@@ -234,3 +235,29 @@ def test_an_already_archived_sale_is_not_archived_again(store):
 
     assert results["archived"]["archived"] == 0
     assert store.sold.count_documents({}) == 1
+
+
+def test_a_pending_listing_archived_as_sold_is_restored(store):
+    store.sold.insert_one(
+        legacy(
+            status=STATUS_SOLD,
+            status_id="6",
+            sold_on=utcnow(),
+            sold_at=utcnow(),
+            archived_at=utcnow(),
+            archived_reason="sold",
+            source_updated_at=utcnow(),
+        )
+    )
+
+    summary = restore_misarchived_pending(store, dry_run=False)
+
+    assert summary["restored"] == 1
+    assert store.sold.count_documents({}) == 0
+    restored = store.properties.find_one({})
+    assert restored["Status"] == STATUS_PENDING
+    assert restored["status_id"] == "6"
+    assert restored.get("pending_on")
+    assert "sold_on" not in restored
+    assert "sold_at" not in restored
+    assert "archived_reason" not in restored

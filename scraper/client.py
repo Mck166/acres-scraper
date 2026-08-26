@@ -366,7 +366,6 @@ class ViewpointClient:
 
         for source, target in (
             ("list_dt", "listed_on"),
-            ("sold_dt", "sold_on"),
             ("close_dt", "closes_on"),
             ("update_dt", "source_updated_at"),
             ("status_dt", "status_changed_on"),
@@ -374,7 +373,10 @@ class ViewpointClient:
             if bootstrap.get(source):
                 raw[target] = bootstrap[source]
 
-        if str(bootstrap.get("status_id") or "") == "6" and bootstrap.get("status_dt"):
+        status_id = str(bootstrap.get("status_id") or "")
+        if status_id == "2" and bootstrap.get("sold_dt"):
+            raw["sold_on"] = bootstrap["sold_dt"]
+        if status_id == "6" and bootstrap.get("status_dt"):
             raw["pending_on"] = bootstrap["status_dt"]
 
         raw["Photos"] = self._photos_for(html, bootstrap, listing_id, class_id)

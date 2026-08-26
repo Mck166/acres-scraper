@@ -18,7 +18,7 @@ from scraper.store import (
     CHANGE_SOLD,
     RunSummary,
 )
-from scraper.sync import Change, apply_change, classify, plan_changes, stale_recheck, sync
+from scraper.sync import Change, apply_change, classify, merge_activity_dates, plan_changes, stale_recheck, sync
 
 ACTIVE, PENDING, SOLD_CLOSED, EXPIRED = "5", "6", "2", "1"
 
@@ -182,9 +182,10 @@ class RecordingClient:
     base_url = "https://www.viewpoint.ca"
     DEFAULT_PRICE = "400000"
 
-    def __init__(self, prices=None, statuses=None):
+    def __init__(self, prices=None, statuses=None, extras=None):
         self.prices = dict(prices or {})
         self.statuses = dict(statuses or {})
+        self.extras = dict(extras or {})
         self.fetches = []
 
     def price_of(self, listing_id):
@@ -193,7 +194,7 @@ class RecordingClient:
     def fetch_listing(self, url):
         self.fetches.append(url)
         listing_id = url.rstrip("/").split("/")[-2]
-        return {
+        document = {
             "url": url,
             "Address": f"{listing_id} Test Street, Halifax",
             "Price": f"${int(self.price_of(listing_id)):,}",
@@ -206,6 +207,8 @@ class RecordingClient:
                 f"https://www.viewpoint.ca/property/cutimagel/{listing_id}/1/1.jpg?&sd=summary&cch=aa"
             ],
         }
+        document.update(self.extras.get(listing_id, {}))
+        return document
 
     def new_today_activity(self, since=None):
         return []
@@ -296,6 +299,48 @@ def test_a_pending_listing_we_never_held_is_stored_active(store):
     assert store.properties.count_documents({}) == 1
     assert store.sold.count_documents({}) == 0
     assert store.properties.find_one({"listing_id": "202600001"})["Status"] == STATUS_PENDING
+
+
+def test_overlay_sold_with_pending_status_id_is_stored_active(store):
+    """Viewpoint's pending overlay says Sold. Status id 6 must win, or the map goes red."""
+    client = RecordingClient(
+        statuses={"202600001": "Sold"},
+        extras={"202600001": {"status_id": "6"}},
+    )
+    summary = sync(
+        client,
+        store,
+        activity=[
+            entry(
+                "202600001",
+                status_id=PENDING,
+                sold_dt="2026-08-26 00:00:00",
+                status_dt="2026-08-26 10:41:59",
+            )
+        ],
+        stale_limit=0,
+    )
+
+    assert summary.new_listings == 1
+    assert store.sold.count_documents({}) == 0
+    stored = store.properties.find_one({"listing_id": "202600001"})
+    assert stored["Status"] == STATUS_PENDING
+    assert stored["status_id"] == "6"
+    assert "sold_on" not in stored
+    assert stored["pending_on"].day == 26
+
+
+def test_pending_feed_sold_dt_is_not_copied_onto_sold_on():
+    document = merge_activity_dates(
+        {"Status": "PENDING SALE", "status_id": "6"},
+        entry(
+            status_id=PENDING,
+            sold_dt="2026-08-26 00:00:00",
+            status_dt="2026-08-26 10:41:59",
+        ),
+    )
+    assert "sold_on" not in document
+    assert document["pending_on"] == "2026-08-26 10:41:59"
 
 
 def test_recent_updates_records_only_notifiable_changes(store):

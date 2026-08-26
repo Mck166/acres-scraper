@@ -73,6 +73,8 @@ def status_from_id(status_id: Any) -> Optional[str]:
 # is an event, not a status, so it is recorded on the document's timestamps and
 # in recent_updates instead of being conflated with the listing's state.
 _SOLD_TOKENS = ("sold", "closed")
+# Checked before _SOLD_TOKENS so "Sold Subject to Conditions" is pending, not sold.
+_PENDING_PHRASES = ("subject to condition", "sold conditional")
 _PENDING_TOKENS = ("pending", "conditional", "offer", "under contract")
 _EXPIRED_TOKENS = ("expired", "withdrawn", "cancelled", "canceled", "terminated")
 
@@ -108,12 +110,14 @@ def normalize_status(value: Any) -> str:
     text = str(value or "").strip().lower()
     if not text:
         return STATUS_FOR_SALE
-    if any(token in text for token in _SOLD_TOKENS):
-        return STATUS_SOLD
-    if any(token in text for token in _EXPIRED_TOKENS):
-        return STATUS_EXPIRED
+    if any(phrase in text for phrase in _PENDING_PHRASES):
+        return STATUS_PENDING
     if any(token in text for token in _PENDING_TOKENS):
         return STATUS_PENDING
+    if any(token in text for token in _EXPIRED_TOKENS):
+        return STATUS_EXPIRED
+    if any(token in text for token in _SOLD_TOKENS):
+        return STATUS_SOLD
     return STATUS_FOR_SALE
 
 
@@ -128,6 +132,36 @@ def is_pending_status(value: Any) -> bool:
 def is_off_market_status(value: Any) -> bool:
     """True when a listing should no longer appear as available."""
     return normalize_status(value) in (STATUS_SOLD, STATUS_EXPIRED)
+
+
+def listing_status_id(document: Optional[Dict[str, Any]]) -> str:
+    if not document:
+        return ""
+    return str(document.get("status_id") or "").strip()
+
+
+def listing_is_pending(document: Optional[Dict[str, Any]]) -> bool:
+    """Pending includes Viewpoint status 6, even when overlay text says Sold."""
+    if listing_status_id(document) == STATUS_ID_PENDING:
+        return True
+    return is_pending_status((document or {}).get("Status"))
+
+
+def listing_is_sold(document: Optional[Dict[str, Any]]) -> bool:
+    if listing_is_pending(document):
+        return False
+    if listing_status_id(document) == STATUS_ID_SOLD:
+        return True
+    return is_sold_status((document or {}).get("Status"))
+
+
+def listing_is_off_market(document: Optional[Dict[str, Any]]) -> bool:
+    """True when a listing should no longer appear as available."""
+    if listing_is_pending(document):
+        return False
+    if listing_status_id(document) == STATUS_ID_SOLD:
+        return True
+    return is_off_market_status((document or {}).get("Status"))
 
 
 def utcnow() -> datetime:
@@ -253,13 +287,18 @@ def normalize_document(raw: Dict[str, Any], url: Optional[str] = None) -> Dict[s
         doc["listing_id"] = str(listing_id)
         doc["listing_class_id"] = str(doc.get("listing_class_id") or class_id_from_url(resolved_url))
 
-    raw_status = str(doc.get("Status") or "").strip().upper()
-    doc["Status"] = normalize_status(raw_status)
+    if doc.get("status_id") is not None and str(doc.get("status_id")).strip():
+        doc["status_id"] = str(doc["status_id"]).strip()
+
+    raw_status = str(doc.get("Status") or "").strip()
+    from_id = status_from_id(doc.get("status_id"))
+    doc["Status"] = from_id or normalize_status(raw_status)
     # Keep the site's own wording only when it says something the normalized
     # value does not. Re-normalizing a document must not overwrite it with the
     # value this function itself produced.
-    if raw_status and raw_status != doc["Status"] and "status_raw" not in doc:
-        doc["status_raw"] = raw_status
+    raw_status_key = raw_status.upper()
+    if raw_status_key and raw_status_key != doc["Status"] and "status_raw" not in doc:
+        doc["status_raw"] = raw_status_key
 
     price_value = parse_price(doc.get("Price"))
     doc["price_value"] = price_value
@@ -287,9 +326,15 @@ def normalize_document(raw: Dict[str, Any], url: Optional[str] = None) -> Dict[s
             elif not doc.get(field):
                 doc.pop(field, None)
 
-    if is_pending_status(doc.get("Status")) and not doc.get("pending_on"):
-        pending = parse_viewpoint_datetime(doc.get("status_changed_on") or doc.get("status_dt"))
-        if pending is not None:
-            doc["pending_on"] = pending
+    if listing_is_pending(doc):
+        if not doc.get("pending_on"):
+            pending = parse_viewpoint_datetime(
+                doc.get("status_changed_on") or doc.get("status_dt") or doc.get("sold_on")
+            )
+            if pending is not None:
+                doc["pending_on"] = pending
+        # Viewpoint stamps sold_dt on subject-to-conditions listings. That date
+        # is the offer, not a close, so it must not land on sold_on.
+        doc.pop("sold_on", None)
 
     return doc

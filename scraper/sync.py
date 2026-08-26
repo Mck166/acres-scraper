@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from .geocode import CachedGeocoder
 from .normalize import (
     STATUS_EXPIRED,
+    STATUS_ID_PENDING,
+    STATUS_ID_SOLD,
     STATUS_PENDING,
     STATUS_SOLD,
     apply_listing_events,
@@ -165,10 +167,20 @@ def enrich_coordinates(document: Dict[str, Any], geocoder: Optional[CachedGeocod
 
 def merge_activity_dates(document: Dict[str, Any], entry: Dict[str, Any]) -> Dict[str, Any]:
     """Fill event dates from the activity feed when the cutsheet omitted them."""
+    if entry.get("status_id") is not None and not document.get("status_id"):
+        document["status_id"] = str(entry["status_id"]).strip()
+
     if entry.get("list_dt") and not document.get("listed_on"):
         document["listed_on"] = entry["list_dt"]
-    if entry.get("sold_dt") and not document.get("sold_on"):
-        document["sold_on"] = entry["sold_dt"]
+
+    status_id = str(entry.get("status_id") or document.get("status_id") or "")
+    if status_id == STATUS_ID_SOLD:
+        if entry.get("sold_dt") and not document.get("sold_on"):
+            document["sold_on"] = entry["sold_dt"]
+    elif status_id == STATUS_ID_PENDING:
+        if entry.get("status_dt") and not document.get("pending_on"):
+            document["pending_on"] = entry["status_dt"]
+
     apply_listing_events(document, entry.get("events") or [])
     return document
 

@@ -18,7 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 from .config import Settings, get_settings
-from .cutsheet import parse_description
+from .cutsheet import parse_bootstrap, parse_description
 from .identity import parse_cutsheet_url
 from .photos import extract_photo_set, normalize_photo_list, photo_urls_for
 
@@ -132,6 +132,10 @@ class SeleniumClient:
         description = parse_description(html)
         if description:
             data["Description"] = description
+
+        bootstrap = parse_bootstrap(html)
+        if bootstrap.get("status_id") is not None:
+            data["status_id"] = str(bootstrap["status_id"])
 
         photos = self.extract_photos(cutsheet_url)
         data["Photos"] = photos
