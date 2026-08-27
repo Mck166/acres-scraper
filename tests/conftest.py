@@ -69,6 +69,7 @@ def _drop_all(store: Store) -> None:
         store.geocode_cache,
         store.scrape_runs,
         store.locks,
+        store.notification_events,
     ):
         collection.drop()
 

@@ -33,7 +33,13 @@ from scraper.inventory import (  # noqa: E402
     probe,
 )
 from scraper.normalize import normalize_document, utcnow  # noqa: E402
-from scraper.run import LOCK_NAME, configure_logging, open_client, refresh_api_index  # noqa: E402
+from scraper.run import (  # noqa: E402
+    LOCK_NAME,
+    configure_logging,
+    dispatch_notifications,
+    open_client,
+    refresh_api_index,
+)
 from scraper.store import RunSummary, Store, connect  # noqa: E402
 from scraper.sync import enrich_coordinates, merge_activity_dates  # noqa: E402
 
@@ -130,6 +136,7 @@ def scan_market(
                     if has_atlantic_today_event(document):
                         store.record_change(result, document)
                         recorded += 1
+                    store.record_push_event(result, document)
                     log.info("%s %s", listing_id, result.action)
                 except Exception as exc:
                     log.error("Failed %s: %s", url, exc)
@@ -138,6 +145,8 @@ def scan_market(
         summary.finished_at = utcnow()
         if apply_changes and summary.writes:
             refresh_api_index(settings)
+        if apply_changes:
+            dispatch_notifications(settings)
 
         return {
             "enumerated": len(entries),

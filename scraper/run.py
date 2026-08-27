@@ -56,19 +56,39 @@ def refresh_api_index(settings: Optional[Settings] = None) -> bool:
     minutes ago keeps showing as for sale. A failure here is not a failed run:
     the cache expires on its own.
     """
+    return _post_acres_api("/api/index/refresh", settings=settings, timeout=30)
+
+
+def dispatch_notifications(settings: Optional[Settings] = None) -> bool:
+    """Ask Acres-API to send favourite-change and inactivity pushes.
+
+    Called after every run, even when nothing listed changed, so the 3-day
+    inactivity nudge still has a chance to fire.
+    """
+    return _post_acres_api("/api/notifications/dispatch", settings=settings, timeout=60)
+
+
+def _post_acres_api(
+    path: str,
+    settings: Optional[Settings] = None,
+    timeout: int = 30,
+) -> bool:
     settings = settings or get_settings()
     if not settings.acres_api_url:
         return False
 
-    url = f"{settings.acres_api_url}/api/index/refresh"
+    url = f"{settings.acres_api_url}{path}"
+    headers = {}
+    if settings.scraper_api_secret:
+        headers["X-Scraper-Secret"] = settings.scraper_api_secret
     try:
-        response = requests.post(url, timeout=30)
+        response = requests.post(url, headers=headers, timeout=timeout)
         response.raise_for_status()
     except requests.RequestException as exc:
-        log.warning("Could not refresh the API index at %s: %s", url, exc)
+        log.warning("Could not reach Acres-API at %s: %s", url, exc)
         return False
 
-    log.info("Refreshed the API index")
+    log.info("Called Acres-API %s", path)
     return True
 
 
@@ -82,6 +102,7 @@ def log_summary(summary: RunSummary) -> None:
             ("new", document["new_listings"]),
             ("price", document["price_changes"]),
             ("sold", document["sold"]),
+            ("pending", document.get("pending", 0)),
             ("delisted", document["delisted"]),
             ("relisted", document["relisted"]),
             ("unchanged", document["unchanged"]),
@@ -140,6 +161,7 @@ def scrape(
 
         if summary.writes:
             refresh_api_index(settings)
+        dispatch_notifications(settings)
 
         return summary
     finally:

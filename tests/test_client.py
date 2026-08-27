@@ -38,12 +38,14 @@ def make_settings(**overrides) -> Settings:
         geocode_cache_collection="geocode_cache",
         scrape_runs_collection="scrape_runs",
         locks_collection="scraper_locks",
+        notification_events_collection="notification_events",
         transport="api",
         stale_recheck_limit=25,
         recent_updates_ttl_seconds=86400,
         request_delay_seconds=0.0,
         run_lock_ttl_seconds=3600,
         acres_api_url="",
+        scraper_api_secret="",
     )
     defaults.update(overrides)
     return Settings(**defaults)

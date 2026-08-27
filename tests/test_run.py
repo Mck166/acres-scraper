@@ -8,7 +8,7 @@ import requests
 
 from scraper import run as run_module
 from scraper.normalize import utcnow
-from scraper.run import LOCK_NAME, RunLocked, log_summary, refresh_api_index, scrape
+from scraper.run import LOCK_NAME, RunLocked, dispatch_notifications, log_summary, refresh_api_index, scrape
 from scraper.store import RunSummary
 
 
@@ -201,10 +201,12 @@ def test_the_summary_logs_as_one_line(store, caplog):
 # -- the API cache -------------------------------------------------------
 
 
-def test_a_run_that_changed_nothing_leaves_the_api_alone(store, stub_client, no_api_calls):
+def test_a_run_that_changed_nothing_still_dispatches_notifications(
+    store, stub_client, no_api_calls, api_settings
+):
     scrape(store=store)
 
-    assert no_api_calls == [], "the API index was rebuilt for no reason"
+    assert no_api_calls == ["https://api.example.com/api/notifications/dispatch"]
 
 
 def test_a_run_that_changed_something_refreshes_the_api(
@@ -222,11 +224,15 @@ def test_a_run_that_changed_something_refreshes_the_api(
 
     scrape(store=store)
 
-    assert no_api_calls == ["https://api.example.com/api/index/refresh"]
+    assert no_api_calls == [
+        "https://api.example.com/api/index/refresh",
+        "https://api.example.com/api/notifications/dispatch",
+    ]
 
 
 def test_a_missing_api_url_is_not_an_error(settings, no_api_calls):
     assert refresh_api_index(replace(settings, acres_api_url="")) is False
+    assert dispatch_notifications(replace(settings, acres_api_url="")) is False
     assert no_api_calls == []
 
 
@@ -237,3 +243,19 @@ def test_an_unreachable_api_does_not_fail_the_run(api_settings, monkeypatch):
     monkeypatch.setattr(run_module.requests, "post", explode)
 
     assert refresh_api_index(api_settings) is False
+    assert dispatch_notifications(api_settings) is False
+
+
+def test_dispatch_sends_the_scraper_secret(api_settings, monkeypatch):
+    configured = replace(api_settings, scraper_api_secret="test-secret")
+    captured = {}
+
+    def record(url, **kwargs):
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers") or {}
+        return OkResponse()
+
+    monkeypatch.setattr(run_module.requests, "post", record)
+    assert dispatch_notifications(configured) is True
+    assert captured["url"] == "https://api.example.com/api/notifications/dispatch"
+    assert captured["headers"]["X-Scraper-Secret"] == "test-secret"

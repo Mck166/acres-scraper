@@ -222,6 +222,7 @@ def apply_change(
         result = store.archive_listing(existing, reason=reason, sold_price=change.sold_price)
         summary.record(result, seen=counts_as_seen)
         store.record_change(result, existing)
+        store.record_push_event(result, existing, action=change.kind)
         log.info("%s %s (no fetch needed)", change.listing_id, result.action)
         return result
 
@@ -240,6 +241,7 @@ def apply_change(
     try:
         result = store.save_listing(document)
         store.record_change(result, document)
+        store.record_push_event(result, document, action=change.kind)
     except Exception as exc:
         log.error("Failed to save %s: %s", change.url, exc)
         summary.errors.append(f"save {change.url}: {exc}")

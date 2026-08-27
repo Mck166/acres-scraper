@@ -13,11 +13,11 @@ from datetime import timedelta
 
 import pytest
 
-from scraper.normalize import STATUS_FOR_SALE, STATUS_SOLD, utcnow
-from scraper.store import CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD
+from scraper.normalize import STATUS_FOR_SALE, STATUS_PENDING, STATUS_SOLD, utcnow
+from scraper.store import CHANGE_NEW, CHANGE_PENDING, CHANGE_PRICE, CHANGE_SOLD
 from scraper.sync import sync
 
-ACTIVE, SOLD_CLOSED, EXPIRED = "5", "2", "1"
+ACTIVE, SOLD_CLOSED, EXPIRED, PENDING = "5", "2", "1", "6"
 
 SHARED_PID = "40123456"
 
@@ -247,6 +247,31 @@ def test_recent_updates_holds_exactly_the_changes_worth_swiping(store, client):
     for doc in updates.values():
         assert doc["listing_id"] == "202600001"
         assert doc["address"] == "12 Bluenose Lane, Chester"
+
+
+def test_notification_events_cover_price_pending_and_sold(store, client):
+    run(client, store, entry("202600001"))
+
+    client.prices["202600001"] = 380000
+    run(client, store, entry("202600001", list_price="380000"))
+
+    client.statuses["202600001"] = STATUS_PENDING
+    pending = run(client, store, entry("202600001", status_id=PENDING))
+    assert pending.pending == 1
+    assert store.properties.find_one({"listing_id": "202600001"})["Status"] == STATUS_PENDING
+
+    run(client, store, entry("202600001", status_id=SOLD_CLOSED, sold_price="375000"))
+
+    events = {doc["change_type"]: doc for doc in store.notification_events.find({})}
+    assert set(events) == {CHANGE_PRICE, CHANGE_PENDING, CHANGE_SOLD}
+    for doc in events.values():
+        assert doc["address"] == "12 Bluenose Lane, Chester"
+        assert doc["processed"] is False
+        assert doc["event_day"]
+
+    deck = {doc["change_type"] for doc in store.recent_updates.find({})}
+    assert CHANGE_PENDING not in deck
+    assert {CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD} <= deck
 
 
 def test_a_change_recorded_twice_does_not_duplicate_the_deck(store, client):

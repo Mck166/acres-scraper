@@ -7,6 +7,7 @@ Three collections carry listing data:
                     favourites and dislikes keep resolving
 ``recent_updates``  one row per change in the last 24 hours, expired by a TTL
                     index, used to drive the app's swipe deck
+``notification_events`` price/pending/sold rows for iOS favourite alerts
 """
 
 from dataclasses import dataclass, field
@@ -22,7 +23,9 @@ from .identity import resolve_listing_id
 from .normalize import (
     STATUS_EXPIRED,
     STATUS_SOLD,
+    atlantic_today,
     listing_is_off_market,
+    listing_is_pending,
     listing_is_sold,
     parse_price,
     utcnow,
@@ -38,6 +41,10 @@ CHANGE_NONE = "none"
 # Changes worth telling the app about. A delisting is not one of them: there is
 # nothing for a user to swipe on, the listing simply stops appearing.
 NOTIFIABLE_CHANGES = (CHANGE_NEW, CHANGE_PRICE, CHANGE_SOLD)
+
+# Favourite push alerts. Pending stays off the swipe deck but still notifies
+# anyone who saved the listing.
+PUSH_CHANGES = (CHANGE_PRICE, CHANGE_PENDING, CHANGE_SOLD)
 
 
 @dataclass
@@ -66,6 +73,7 @@ class RunSummary:
     new_listings: int = 0
     price_changes: int = 0
     sold: int = 0
+    pending: int = 0
     delisted: int = 0
     unchanged: int = 0
     relisted: int = 0
@@ -88,6 +96,8 @@ class RunSummary:
             self.price_changes += 1
         elif result.action == CHANGE_SOLD:
             self.sold += 1
+        elif result.action == CHANGE_PENDING:
+            self.pending += 1
         elif result.action == CHANGE_DELISTED:
             self.delisted += 1
         else:
@@ -98,7 +108,13 @@ class RunSummary:
     @property
     def writes(self) -> int:
         """How many listings this run actually changed."""
-        return self.new_listings + self.price_changes + self.sold + self.delisted
+        return (
+            self.new_listings
+            + self.price_changes
+            + self.sold
+            + self.pending
+            + self.delisted
+        )
 
     def to_document(self) -> Dict[str, Any]:
         finished = self.finished_at or utcnow()
@@ -110,6 +126,7 @@ class RunSummary:
             "new_listings": self.new_listings,
             "price_changes": self.price_changes,
             "sold": self.sold,
+            "pending": self.pending,
             "delisted": self.delisted,
             "unchanged": self.unchanged,
             "relisted": self.relisted,
@@ -157,6 +174,10 @@ class Store:
         return self.db[self.settings.recent_updates_collection]
 
     @property
+    def notification_events(self):
+        return self.db[self.settings.notification_events_collection]
+
+    @property
     def geocode_cache(self):
         return self.db[self.settings.geocode_cache_collection]
 
@@ -196,6 +217,11 @@ class Store:
         )
         self.recent_updates.create_index("property_id")
         self.recent_updates.create_index("listing_id")
+        self.notification_events.create_index(
+            [("property_id", ASCENDING), ("change_type", ASCENDING), ("event_day", ASCENDING)],
+            unique=True,
+        )
+        self.notification_events.create_index("processed")
         self.sold.create_index("sold_at")
         self._ensure_ttl_index(self.locks, "expires_at", 0)
 
@@ -354,7 +380,13 @@ class Store:
         merged["_id"] = existing["_id"]
         self.properties.replace_one({"_id": existing["_id"]}, merged)
 
-        action = CHANGE_PRICE if price_changed else CHANGE_NONE
+        became_pending = listing_is_pending(merged) and not listing_is_pending(existing)
+        if price_changed:
+            action = CHANGE_PRICE
+        elif became_pending:
+            action = CHANGE_PENDING
+        else:
+            action = CHANGE_NONE
 
         return SaveResult(
             listing_id=resolve_listing_id(existing) or resolve_listing_id(document),
@@ -532,6 +564,44 @@ class Store:
                     "source_collection": source,
                     "changed_at": utcnow(),
                 }
+            },
+            upsert=True,
+        )
+
+    def record_push_event(
+        self,
+        result: SaveResult,
+        document: Dict[str, Any],
+        action: Optional[str] = None,
+    ) -> None:
+        """Queue a favourite push for price, pending, and sold changes.
+
+        Pending is deliberately excluded from ``recent_updates`` (nothing to
+        swipe on) but still belongs in this collection.
+        """
+        kind = action or result.action
+        if kind not in PUSH_CHANGES or result.property_id is None:
+            return
+
+        event_day = atlantic_today().isoformat()
+        self.notification_events.update_one(
+            {
+                "property_id": str(result.property_id),
+                "change_type": kind,
+                "event_day": event_day,
+            },
+            {
+                "$setOnInsert": {
+                    "property_id": str(result.property_id),
+                    "change_type": kind,
+                    "event_day": event_day,
+                    "created_at": utcnow(),
+                    "processed": False,
+                },
+                "$set": {
+                    "address": document.get("Address"),
+                    "listing_id": result.listing_id,
+                },
             },
             upsert=True,
         )

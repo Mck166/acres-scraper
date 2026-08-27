@@ -33,6 +33,7 @@ class Settings:
     geocode_cache_collection: str
     scrape_runs_collection: str
     locks_collection: str
+    notification_events_collection: str
 
     transport: str
     stale_recheck_limit: int
@@ -41,6 +42,7 @@ class Settings:
     run_lock_ttl_seconds: int
 
     acres_api_url: str
+    scraper_api_secret: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,6 +66,9 @@ class Settings:
                 "MONGODB_SCRAPE_RUNS_COLLECTION_NAME", "scrape_runs"
             ),
             locks_collection=os.getenv("MONGODB_LOCKS_COLLECTION_NAME", "scraper_locks"),
+            notification_events_collection=os.getenv(
+                "MONGODB_NOTIFICATION_EVENTS_COLLECTION_NAME", "notification_events"
+            ),
             transport=os.getenv("SCRAPER_TRANSPORT", "api").strip().lower(),
             stale_recheck_limit=_int_env("STALE_RECHECK_LIMIT", 25),
             recent_updates_ttl_seconds=_int_env("RECENT_UPDATES_TTL_SECONDS", 86400),
@@ -72,6 +77,7 @@ class Settings:
             # killed container does not block the next scheduled run for long.
             run_lock_ttl_seconds=_int_env("RUN_LOCK_TTL_SECONDS", 3600),
             acres_api_url=os.getenv("ACRES_API_URL", "").rstrip("/"),
+            scraper_api_secret=os.getenv("SCRAPER_API_SECRET", "").strip(),
         )
 
 
