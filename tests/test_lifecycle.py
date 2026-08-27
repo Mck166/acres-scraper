@@ -278,6 +278,7 @@ def test_a_listing_that_returns_under_its_own_id_moves_back(store, client):
     back = store.properties.find_one({"listing_id": "202600001"})
     assert back["_id"] == original_id, "the id must survive a return to the market"
     assert back["relisted"] is True
+    assert "sold_on" not in back
     assert "sold_at" not in back
     assert "sold_price" not in back
 

@@ -446,7 +446,14 @@ class Store:
             revived["date_updated"] = now
             revived["relisted"] = True
             revived["relisted_at"] = now
-            for key in ("sold_at", "sold_price", "archived_at", "archived_reason", "days_on_market"):
+            for key in (
+                "sold_on",
+                "sold_at",
+                "sold_price",
+                "archived_at",
+                "archived_reason",
+                "days_on_market",
+            ):
                 revived.pop(key, None)
 
             self.properties.replace_one({"_id": archived["_id"]}, revived, upsert=True)
