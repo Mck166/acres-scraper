@@ -12,7 +12,7 @@ echo "MONGODB_URI: ${MONGODB_URI:+***}"
 printenv | grep -v "no_proxy" > /etc/environment
 
 # Update cron job to include environment variables
-echo "0 */6 * * * . /etc/environment; cd /app && /usr/local/bin/python app.py >> /app/logs/cron.log 2>&1" > /etc/cron.d/scraper-cron
+echo "0 */3 * * * . /etc/environment; cd /app && /usr/local/bin/python app.py >> /app/logs/cron.log 2>&1" > /etc/cron.d/scraper-cron
 chmod 0644 /etc/cron.d/scraper-cron
 crontab /etc/cron.d/scraper-cron
 
@@ -20,7 +20,7 @@ crontab /etc/cron.d/scraper-cron
 service cron start
 
 # Keep container running and tail the cron log
-echo "Cron daemon started. Scraper will run every 6 hours."
+echo "Cron daemon started. Scraper will run every 3 hours."
 echo "View logs with: docker logs <container-name>"
 echo "Or follow logs in real-time: tail -f /app/logs/cron.log"
 echo ""

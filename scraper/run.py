@@ -1,6 +1,6 @@
 """Entry point for a scraper run.
 
-A run takes a lock in MongoDB before it starts. Cron fires every six hours and a
+A run takes a lock in MongoDB before it starts. Cron fires every three hours and a
 run that hits a slow site can outlast its slot, so without the lock two runs
 could archive and re-insert the same listing at the same time. The lock carries
 a TTL, so a container killed mid-run frees it without anyone intervening.

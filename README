@@ -35,7 +35,7 @@ A web scraper for property listings from viewpoint.ca
 
 ### How It Works
 
-- The scraper runs automatically every 6 hours via cron
+- The scraper runs automatically every 3 hours via cron
 - It also runs once immediately when the container starts
 - Logs are stored in the `./logs` directory (mounted as a volume)
 - The container stays running to execute scheduled runs
